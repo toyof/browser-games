@@ -18,6 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   `position:fixed` で左上に出るので、**ゲーム側のUIと重ならない余白を確保する**こと。
 - ゲーム: `suika/`(Planet Merge、Matter.js を CDN から読込) / `car/`(ラインロード) / `space/`(Space Shooter) /
   `dance/`(Taiko Beat) / `paint/`(Doodle Lab、仕様は `paint/REQUIREMENTS.md`)
+- `assets/audio-unlock.js` — スマホで音を出す共通対策(iOS は touchend/click で resume が必要、マナースイッチ対策)。音を出すゲームは `<head>` で読み込む。
 - 音は基本 Web Audio で合成。例外は `dance/songs/*.mp3`(FreePD.com の CC0/Public Domain 曲)。音源を足す場合は出典・ライセンスを README に書く。
 
 ## スマホ対応のルール
