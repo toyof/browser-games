@@ -7,11 +7,13 @@
 <style>
   html,body{margin:0;height:100%;background:#0b0b16;color:#fff;font-family:system-ui,sans-serif;overflow:hidden}
   html,body{touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
-  canvas{display:block;margin:0 auto;width:min(100vw,calc(100dvh*2/3));height:auto;aspect-ratio:2/3;background:#10101f;touch-action:none}
+  body{display:flex;align-items:flex-end;justify-content:center;height:100dvh}
+  canvas{display:block;margin:0 auto;width:min(100vw,calc((100dvh - 44px)*2/3));height:auto;aspect-ratio:2/3;background:#10101f;touch-action:none}
 </style>
 </head>
 <body>
 <canvas id="c" width="480" height="720"></canvas>
+<script src="songs/songs.js"></script>
 <script>
 "use strict";
 // ============ 設定 ============
@@ -27,8 +29,8 @@ const CFG = {
 };
 // 2レーン: 左ボタン(F / D / ←)と右ボタン(J / K / →)が1つずつ
 const KEY_LANE = { KeyF:0, KeyD:0, ArrowLeft:0, KeyJ:1, KeyK:1, ArrowRight:1 };
-const KEY_LABEL = "左: F   右: J";
-const RED = "#ff4a3d", ROLL = "#ffd24d";
+
+const RED = "#ff4a3d", BLUE = "#3d9bff", ROLL = "#ffd24d", LANE_COL = [RED, BLUE];
 const LEVELS = [
   { name:"かんたん", star:1, color:"#6dff7a", win:1.3, speed:420, desc:"2拍に1回",     rolls:[15,23] },
   { name:"ふつう",   star:3, color:"#4dc3ff", win:1.1, speed:480, desc:"4分音符+連打",  rolls:[11,19,27] },
@@ -44,119 +46,95 @@ const W = cv.width, H = cv.height;
 const LANE_XS = [W/2-70, W/2+70], LANE_X = W/2, R = 34;   // 左右2レーン(LANE_Xは中央)
 const LANE_W = 112, SIDE_X = [56, W-56];                   // レーン幅 / 脇のキャラの位置
 const HIT_Y = () => CFG.flowDown ? H-190 : 190;
-const beatSec = 60 / CFG.bpm;
+let songIdx = 0;
+const song = () => SONGS[songIdx];
 
-// ============ 譜面(コードで生成) ============
+// ============ 譜面(dance/tools/build_songs.py が曲から自動生成 → songs/songs.js) ============
 function buildChart(){
+  const S = song(), L = S.levels[level], step = 60 / S.bpm / 4;   // 16分音符の長さ
   const notes = [];
-  const rollBars = LEVELS[level].rolls, rollBeats = level===3 ? 3 : 2;
-  const rollAt = bar => rollBars.includes(bar);
-  // 左右の割り当て: 前半は交互(左右左右)、後半は 左右右左 のくり返し
-  let seq = 0;
-  const add = (beat) => {
-    const lane = beat < 32 ? seq%2 : [0,1,1,0][seq%4];
-    seq++;
-    notes.push({ kind:"note", lane, t:(CFG.leadBeats + beat)*beatSec, hit:false, judged:false });
-  };
-  const patA = [0,1,2,3];
-  const patC = [0,0.5,1,2,2.5,3];
-  const patD = [0,0.5,1,1.5,2,2.5,3,3.5];
-  for(let bar=2; bar<CFG.bars-2; bar++){
-    if(rollAt(bar)){
-      const t = (CFG.leadBeats + bar*4)*beatSec;
-      notes.push({ kind:"roll", t, end:t+rollBeats*beatSec, hits:0, judged:false, hit:false });
-      // 連打の後ろ(余白)に1打だけ置く
-      add(bar*4 + rollBeats + 1);
-      continue;
-    }
-    let p;
-    if(bar<8) p = patA;
-    else if(bar<16) p = bar%2? patC:patA;
-    else if(bar<24) p = bar%4==3? patD:(bar%2? patC:patA);
-    else p = bar%2? patD:patC;
-    if(level===0){ if(bar<4) continue; p = p.filter(b=> b%2===0); }
-    else if(level===1){ p = p.filter(b=> b%1===0); }
-    else if(level===2){ if(p===patD) p = patC; }
-    else if(level===3){ if(bar>=8 && p===patC) p = patD; }
-    p.forEach(b=> add(bar*4+b));
+  for(const [k,lane] of L.n) notes.push({ kind:"note", lane, t:S.offset + k*step, hit:false, judged:false });
+  for(const [k,len] of L.r){
+    const t = S.offset + k*step;
+    notes.push({ kind:"roll", t, end:t + len*step, hits:0, judged:false, hit:false });
   }
   notes.sort((a,b)=>a.t-b.t);
   return notes;
 }
 
-// ============ 音(Web Audioで生成) ============
-let ac = null, master = null, songStart = 0, songLen = 0;
-function noiseBuf(){
-  const b = ac.createBuffer(1, ac.sampleRate*0.3, ac.sampleRate), d=b.getChannelData(0);
-  for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1; return b;
+// ============ 音 ============
+// 曲: songs/*.mp3 (FreePD.com, CC0/Public Domain) を decodeAudioData で再生。
+// ヒット音: ドン(左・低い太鼓) / カッ(右・縁の高い音) を Web Audio で合成。
+let ac = null, master = null, musicGain = null, songStart = 0, songLen = 0, nb = null, musicSrc = null;
+const bufCache = {}; let loadError = "";
+function initAudio(){
+  if(ac) return;
+  ac = new (window.AudioContext||window.webkitAudioContext)();
+  nb = ac.createBuffer(1, ac.sampleRate*0.3, ac.sampleRate);
+  const d = nb.getChannelData(0); for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
 }
-function kick(t){
-  const o=ac.createOscillator(), v=ac.createGain();
-  o.frequency.setValueAtTime(160,t); o.frequency.exponentialRampToValueAtTime(40,t+0.15);
-  v.gain.setValueAtTime(0.9,t); v.gain.exponentialRampToValueAtTime(0.001,t+0.2);
-  o.connect(v).connect(master); o.start(t); o.stop(t+0.25);
+async function loadSong(i){
+  const id = SONGS[i].id;
+  if(bufCache[id]) return bufCache[id];
+  const res = await fetch(`songs/${id}.mp3`);
+  if(!res.ok) throw new Error("HTTP "+res.status);
+  const buf = await ac.decodeAudioData(await res.arrayBuffer());
+  return bufCache[id] = buf;
 }
-function noiseHit(t, dur, freq, vol, type){
+function noiseHit(t, dur, freq, vol, type, q=1){
   const s=ac.createBufferSource(); s.buffer=nb;
-  const f=ac.createBiquadFilter(); f.type=type; f.frequency.value=freq;
+  const f=ac.createBiquadFilter(); f.type=type; f.frequency.value=freq; f.Q.value=q;
   const v=ac.createGain(); v.gain.setValueAtTime(vol,t); v.gain.exponentialRampToValueAtTime(0.001,t+dur);
   s.connect(f).connect(v).connect(master); s.start(t); s.stop(t+dur+0.02);
 }
-function tone(t, freq, dur, vol, type="sawtooth"){
-  const o=ac.createOscillator(), v=ac.createGain(), f=ac.createBiquadFilter();
-  o.type=type; o.frequency.value=freq; f.type="lowpass"; f.frequency.value=1400;
-  v.gain.setValueAtTime(vol,t); v.gain.exponentialRampToValueAtTime(0.001,t+dur);
-  o.connect(f).connect(v).connect(master); o.start(t); o.stop(t+dur+0.02);
-}
-let nb;
-const midi = n => 440*Math.pow(2,(n-69)/12);
-const BASS = [45,45,48,43]; // Am - Am - C - G 的な進行(小節ごと)
-const LEAD = [69,72,76,72, 67,71,74,71];
-function scheduleSong(t0){
-  nb = noiseBuf();
-  const total = (CFG.leadBeats + CFG.bars*4)*2; // 8分単位
-  for(let i=0;i<total;i++){
-    const t = t0 + i*beatSec/2, beat = i/2, step=i%2;
-    const inLead = beat < CFG.leadBeats;
-    const bar = Math.floor((beat-CFG.leadBeats)/4);
-    if(inLead){ if(step==0) noiseHit(t,0.05,6000,0.3,"highpass"); continue; }  // カウント
-    if(step==0 && beat%1==0){
-      if(beat%2==0 || true) kick(t);
-    }
-    if(beat%2==1 && step==0) noiseHit(t,0.15,1800,0.5,"bandpass"); // スネア
-    if(step==1) noiseHit(t,0.05,7000,0.25,"highpass");              // ハット
-    const root = BASS[(bar+4)%4%BASS.length];
-    if(bar>=0) tone(t, midi(root-12), beatSec/2*0.9, 0.22, "square");
-    if(bar>=4 && bar<CFG.bars-2 && step==0 && (beat%0.5==0)){
-      const n = LEAD[(Math.floor(i/1))%LEAD.length] + (BASS[bar%4]-45);
-      tone(t, midi(n), beatSec*0.8, 0.07);
-    }
-  }
-  songLen = (CFG.leadBeats + CFG.bars*4)*beatSec;
-}
 function songTime(){ return ac.currentTime - songStart - CFG.offset; }
-function sfx(type){ // ヒット音
-  const t=ac.currentTime, o=ac.createOscillator(), v=ac.createGain();
-  o.frequency.value=type? 1400:260; o.type=type?"square":"sine"; v.gain.setValueAtTime(0.25,t); v.gain.exponentialRampToValueAtTime(0.001,t+0.08);
-  o.connect(v).connect(master); o.start(t); o.stop(t+0.06);
+function sfx(lane){   // 0=ドン(低く太い) / 1=カッ(縁を叩く高い音)
+  if(!ac||!master) return;
+  const t=ac.currentTime;
+  if(lane===0){
+    const o=ac.createOscillator(), v=ac.createGain();
+    o.type="sine"; o.frequency.setValueAtTime(210,t); o.frequency.exponentialRampToValueAtTime(75,t+0.12);
+    v.gain.setValueAtTime(1.0,t); v.gain.exponentialRampToValueAtTime(0.001,t+0.22);
+    o.connect(v).connect(master); o.start(t); o.stop(t+0.25);
+    noiseHit(t,0.04,900,0.35,"lowpass");
+  } else {
+    const o=ac.createOscillator(), v=ac.createGain();
+    o.type="triangle"; o.frequency.setValueAtTime(1500,t); o.frequency.exponentialRampToValueAtTime(900,t+0.05);
+    v.gain.setValueAtTime(0.5,t); v.gain.exponentialRampToValueAtTime(0.001,t+0.09);
+    o.connect(v).connect(master); o.start(t); o.stop(t+0.1);
+    noiseHit(t,0.06,3800,0.8,"bandpass",1.5);
+  }
 }
 
 // ============ ゲーム状態 ============
 let state = "title"; // title | play | pause | result
 let notes = [], score, combo, maxCombo, counts, rollTotal, lastJudge = null, flash = [0,0], held = {};
 let frameN = 0, lastPress = [-99,-99];   // フレーム数(パラパラ用) / 各レーンが最後に叩かれたフレーム
-function start(){
-  if(!ac) ac = new (window.AudioContext||window.webkitAudioContext)();
+async function start(){
+  if(state==="loading") return;
+  initAudio();
+  if(ac.state!=="running") ac.resume();      // ユーザー操作の中で呼ぶ(iOS対策)
+  if(musicSrc){ try{ musicSrc.stop(); }catch(e){} musicSrc=null; }
   if(master) master.disconnect();
+  loadError = "";
+  let buf;
+  if(!bufCache[song().id]){
+    state="loading";
+    try{ buf = await loadSong(songIdx); }
+    catch(e){ loadError = "曲を読み込めませんでした(file:// では動きません。サーバー経由で開いてください)"; state="title"; return; }
+  } else buf = bufCache[song().id];
   master = ac.createGain(); master.gain.value=0.8; master.connect(ac.destination);
-  if(ac.state!=="running") ac.resume();
+  musicGain = ac.createGain(); musicGain.gain.value=0.7; musicGain.connect(master);
   applyLevel(); CFG.speed = LEVELS[level].speed;
   notes = buildChart(); score=0; combo=0; maxCombo=0; lastJudge=null; rollTotal=0;
   counts={perfect:0,great:0,good:0,miss:0};
-  songStart = ac.currentTime + 0.5; scheduleSong(songStart);
+  songStart = ac.currentTime + 1.5;          // 曲の頭の前に1.5秒のカウントイン
+  songLen = song().dur;
+  musicSrc = ac.createBufferSource(); musicSrc.buffer = buf; musicSrc.connect(musicGain); musicSrc.start(songStart);
   state = "play";
 }
 function toTitle(){
+  if(musicSrc){ try{ musicSrc.stop(); }catch(e){} musicSrc=null; }
   if(master){ master.disconnect(); master=null; }
   if(ac) ac.resume();
   state="title";
@@ -201,6 +179,7 @@ function finish(){
   const acc = total? r/total : 0;
   window.rank = acc>=0.95?"S": acc>=0.85?"A": acc>=0.7?"B":"C";
   window.acc = acc;
+  try{ if(score > (+localStorage.getItem("taikoHi")||0)) localStorage.setItem("taikoHi", score); }catch(e){}
 }
 
 // ============ 入力 ============
@@ -214,6 +193,7 @@ addEventListener("keydown", e=>{
     if(e.code==="ArrowLeft"||e.code==="ArrowUp"){ e.preventDefault(); changeLevel(level-1); return; }
     if(e.code==="ArrowRight"||e.code==="ArrowDown"){ e.preventDefault(); changeLevel(level+1); return; }
     const m=/^(Digit|Numpad)([1-4])$/.exec(e.code); if(m){ changeLevel(+m[2]-1); return; }
+    if(e.code==="KeyS"){ songIdx=(songIdx+1)%SONGS.length; return; }
     if(e.code==="Enter"||e.code==="Space"){ e.preventDefault(); start(); return; }
     if(state==="result" && (e.code==="KeyT"||e.code==="Escape")){ toTitle(); return; }
   }
@@ -254,9 +234,9 @@ cv.addEventListener("pointerdown", e=>{
 
 // ============ 描画 ============
 function text(s,x,y,size,color="#fff",align="center"){ g.fillStyle=color; g.font=`bold ${size}px system-ui,sans-serif`; g.textAlign=align; g.fillText(s,x,y); }
-function drum(x,y,alpha=1,dim=false,r=R){
+function drum(x,y,alpha=1,dim=false,r=R,col=RED){
   g.globalAlpha=alpha;
-  g.beginPath(); g.arc(x,y,r,0,Math.PI*2); g.fillStyle=dim?"#555":RED; g.fill();
+  g.beginPath(); g.arc(x,y,r,0,Math.PI*2); g.fillStyle=dim?"#555":col; g.fill();
   g.lineWidth=6*r/R; g.strokeStyle="#fff"; g.stroke();
   g.beginPath(); g.arc(x,y,r*0.45,0,Math.PI*2); g.fillStyle=dim?"#777":"#ffd0c8"; g.fill();
   g.globalAlpha=1;
@@ -297,14 +277,23 @@ function drawDancers(now){
     text(f%2?"♪":"♫", SIDE_X[i]+(i?-30:30), 170-(f%2?0:10), 26, "#ffd24d");
   }
 }
+function songSelect(y){
+  SONGS.forEach((S,i)=>{
+    const x=40+(i%2)*205, yy=y+Math.floor(i/2)*58, sel=i===songIdx;
+    buttons.push({x,y:yy,w:195,h:50,fn:()=>{ songIdx=i; }});
+    g.fillStyle=sel? S.color : "rgba(255,255,255,0.08)"; g.fillRect(x,yy,195,50);
+    text(S.title,x+10,yy+22,16,sel?"#111":"#ccc","left");
+    text(`BPM ${S.bpm}`,x+10,yy+41,12,sel?"#222":"#777","left");
+  });
+}
 function levelSelect(y){
   LEVELS.forEach((L,i)=>{
-    const yy=y+i*62, sel=i===level;
-    buttons.push({x:60,y:yy,w:360,h:54,fn:()=>changeLevel(i)});
-    g.fillStyle=sel? L.color : "rgba(255,255,255,0.08)"; g.fillRect(60,yy,360,54);
-    text(`${i+1}. ${L.name}`,78,yy+24,20,sel?"#111":"#aaa","left");
-    text("★".repeat(Math.min(L.star,5))+(L.star>5?"+":""),78,yy+44,13,sel?"#111":"#777","left");
-    text(L.desc,408,yy+34,13,sel?"#222":"#666","right");
+    const yy=y+i*56, sel=i===level;
+    buttons.push({x:40,y:yy,w:400,h:50,fn:()=>changeLevel(i)});
+    g.fillStyle=sel? L.color : "rgba(255,255,255,0.08)"; g.fillRect(40,yy,400,50);
+    text(`${i+1}. ${L.name}`,56,yy+22,18,sel?"#111":"#aaa","left");
+    text("★".repeat(Math.min(L.star,5))+(L.star>5?"+":""),56,yy+41,12,sel?"#111":"#777","left");
+    text(L.desc,428,yy+31,13,sel?"#222":"#666","right");
   });
 }
 const settingsLine = () => `音ズレ補正 [ ] : ${(CFG.offset*1000).toFixed(0)}ms   速度 - = : ${CFG.speed}   H: ${CFG.flowDown?"上→下":"下→上"}`;
@@ -315,14 +304,18 @@ function draw(){
   const gr=g.createLinearGradient(0,0,0,H); gr.addColorStop(0,"#2a1020"); gr.addColorStop(1,"#0b0b16");
   g.fillStyle=gr; g.fillRect(0,0,W,H);
 
-  if(state==="title"){
-    text("TAIKO BEAT",W/2,100,46);
-    drum(W/2,170,1,false,32);
-    levelSelect(225);
-    button("スタート (Enter)",W/2-120,490,240,52,start,RED);
-    text(`${KEY_LABEL}  (画面の左半分/右半分タップもOK)`,W/2,590,17,"#9ad");
-    text("左右のレーンの赤い玉を叩こう / 黄色い帯は連打(左右どちらでもOK)!",W/2,620,13,"#aaa");
-    text(settingsLine(),W/2,680,11,"#889");
+  if(state==="title"||state==="loading"){
+    text("TAIKO BEAT",W/2,70,42);
+    text("曲",40,118,14,"#9ad","left");
+    songSelect(128);
+    text("むずかしさ",40,262,14,"#9ad","left");
+    levelSelect(272);
+    button(state==="loading"?"よみこみ中…":"スタート (Enter)",W/2-120,508,240,52,start,RED);
+    if(loadError) text(loadError,W/2,580,12,"#ff8a8a");
+    else text("左のレーン=ドン(赤) / 右のレーン=カッ(青)。画面の左右タップもOK",W/2,584,13,"#9ad");
+    text("黄色い帯は連打(左右どちらでもOK) / キー: 左 F・D・← 右 J・K・→ / S: 曲変更",W/2,608,11,"#aaa");
+    text("曲: FreePD.com (CC0 / Public Domain)",W/2,636,11,"#778");
+    text(settingsLine(),W/2,690,11,"#889");
     return;
   }
   if(state==="result"){
@@ -332,7 +325,7 @@ function draw(){
     text(`MAX COMBO ${maxCombo}   ACC ${(window.acc*100).toFixed(1)}%   連打 ${rollTotal}`,W/2,318,14,"#ccc");
     const rows=[["PERFECT",counts.perfect,"#ffd24d"],["GREAT",counts.great,"#6dff7a"],["GOOD",counts.good,"#4dc3ff"],["MISS",counts.miss,"#ff4d6d"]];
     rows.forEach((r,i)=>{ text(r[0],W/2-10,370+i*34,22,r[2],"right"); text(String(r[1]),W/2+20,370+i*34,22,"#fff","left"); });
-    text(`レベル: ${LEVELS[level].name}(1〜4 / ← → で変更)`,W/2,545,14,"#ccc");
+    text(`${song().title} / ${LEVELS[level].name}(1〜4 / ← → でレベル、S で曲変更)`,W/2,545,13,"#ccc");
     button("もう一度 (Enter)",W/2-120,565,240,48,start,RED);
     button("タイトルへ (T)",W/2-120,625,240,48,toTitle);
     return;
@@ -367,7 +360,7 @@ function draw(){
     const n=notes[i]; if(n.kind!=="note"||n.hit) continue;
     const y=yOf(n.t);
     if(y<-R||y>H+R) continue;
-    drum(LANE_XS[n.lane],y,1,n.judged);
+    drum(LANE_XS[n.lane],y,1,n.judged,R,LANE_COL[n.lane]);
   }
   // 連打カウンタ
   const ar = activeRoll(now);
@@ -375,15 +368,15 @@ function draw(){
   // ボタン表示(左右1つずつ)
   const ky = CFG.flowDown ? hy+R+70 : hy-R-70;
   const pressed = [0,1].map(i=> Object.keys(held).some(k=> KEY_LANE[k]===i || k==="pointer"+i));
-  [["F",0],["J",1]].forEach(([label,i])=>{
+  [["ドン",0],["カッ",1]].forEach(([label,i])=>{
     const on=pressed[i];
-    g.beginPath(); g.roundRect(LANE_XS[i]-52,ky-26,104,52,12); g.fillStyle=on?RED:"#20202c"; g.fill();
-    g.lineWidth=3; g.strokeStyle=RED; g.stroke();
-    text(label,LANE_XS[i],ky+10,28,on?"#fff":RED);
+    g.beginPath(); g.roundRect(LANE_XS[i]-52,ky-26,104,52,12); g.fillStyle=on?LANE_COL[i]:"#20202c"; g.fill();
+    g.lineWidth=3; g.strokeStyle=LANE_COL[i]; g.stroke();
+    text(label,LANE_XS[i],ky+9,24,on?"#fff":LANE_COL[i]);
   });
   // HUD
   text(`SCORE ${score}`,16,32,22,"#fff","left");
-  text(LEVELS[level].name,W-16,32,18,LEVELS[level].color,"right");
+  text(`${song().title} / ${LEVELS[level].name}`,W-16,32,14,LEVELS[level].color,"right");
   if(combo>=2){ text(combo,SIDE_X[0],H/2+90,48,"rgba(255,255,255,0.85)"); text("COMBO",SIDE_X[0],H/2+112,13,"#ccc"); }
   if(lastJudge && performance.now()-lastJudge.t<500){
     const c={perfect:"#ffd24d",great:"#6dff7a",good:"#4dc3ff",miss:"#ff4d6d"}[lastJudge.kind];

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ブラウザで遊べるミニゲーム集。**ビルド・依存管理・テスト・Lint は無し**の静的HTML(GitHub Pages で公開、`.nojekyll` あり)。
 各ゲームは `<dir>/index.html` 1ファイルに HTML/CSS/JS が全部入っている。
 
-実行: `python3 -m http.server` でルートを配信するか、`index.html` を直接開く(`file://` でも動く)。
+実行: `python3 -m http.server` でルートを配信して開く。`dance/` は曲を `fetch` するため `file://` では動かない(他のゲームは動く)。
 
 ## 構成
 
@@ -18,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   `position:fixed` で左上に出るので、**ゲーム側のUIと重ならない余白を確保する**こと。
 - ゲーム: `suika/`(Planet Merge、Matter.js を CDN から読込) / `car/`(ラインロード) / `space/`(Space Shooter) /
   `dance/`(Taiko Beat) / `paint/`(Doodle Lab、仕様は `paint/REQUIREMENTS.md`)
-- 音は全て Web Audio で合成(音源ファイル無し)。例外を作る場合は出典・ライセンスを README に書く。
+- 音は基本 Web Audio で合成。例外は `dance/songs/*.mp3`(FreePD.com の CC0/Public Domain 曲)。音源を足す場合は出典・ライセンスを README に書く。
 
 ## スマホ対応のルール
 
@@ -35,5 +35,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## ゲーム固有の注意
 
 - `car/`: 物理は固定刻み(`STEP=1/60`)。速度ボタンやリフレッシュレートで結果が変わらないようにしてある。刻みは変えない。
-- `dance/`: 譜面は `buildChart()` が BPM 基準でコード生成(難易度は `LEVELS`)。曲は `scheduleSong()` が合成。
-  判定時刻は `songTime()`(AudioContext 基準)で、描画・判定・音が同じ時計を共有する。
+- `dance/`: 曲は `songs/*.mp3`、譜面は `songs/songs.js`(**自動生成物。手で編集しない**)。
+  `python3 dance/tools/build_songs.py <元mp3のdir>` が BPM 固定グリッド上に曲の音の強さから譜面を作る(要 numpy/librosa/ffmpeg)。
+  曲を足すときは `build_songs.py` の `SONGS` に BPM とオフセット(最初の拍の秒)を追加して再生成する。
+  判定時刻は `songTime()`(AudioContext 基準)で、描画・判定・曲・ヒット音(ドン=左/カッ=右、合成)が同じ時計を共有する。
