@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Taiko Beat</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0b16;color:#fff;font-family:system-ui,sans-serif;overflow:hidden}
+  canvas{display:block;margin:0 auto;height:100vh;max-width:100vw;background:#10101f}
+</style>
+</head>
+<body>
+<canvas id="c" width="480" height="720"></canvas>
+<script>
+"use strict";
+// ============ 設定 ============
+const CFG = {
+  bpm: 128,
+  bars: 32,
+  leadBeats: 8,
+  windows: { perfect: 0.045, great: 0.090, good: 0.135 },
+  score: { perfect: 1000, great: 700, good: 400 },
+  speed: 480,          // px/秒
+  flowDown: true,      // true: 上→下 / false: 下→上
+  offset: 0,
+};
+// 2レーン: 左ボタン(F / D / ←)と右ボタン(J / K / →)が1つずつ
+const KEY_LANE = { KeyF:0, KeyD:0, ArrowLeft:0, KeyJ:1, KeyK:1, ArrowRight:1 };
+const KEY_LABEL = "左: F   右: J";
+const RED = "#ff4a3d", ROLL = "#ffd24d";
+const LEVELS = [
+  { name:"かんたん", star:1, color:"#6dff7a", win:1.3, speed:420, desc:"2拍に1回",     rolls:[15,23] },
+  { name:"ふつう",   star:3, color:"#4dc3ff", win:1.1, speed:480, desc:"4分音符+連打",  rolls:[11,19,27] },
+  { name:"むずかしい", star:5, color:"#ffd24d", win:1.0, speed:540, desc:"8分まじり+連打", rolls:[7,15,23,27] },
+  { name:"鬼",       star:8, color:"#ff4a3d", win:0.8, speed:600, desc:"8分連打+長い連打", rolls:[7,11,15,19,23,27] },
+];
+let level = 1;
+const BASE_WIN = { perfect:0.045, great:0.090, good:0.135 };
+function applyLevel(){ const L = LEVELS[level]; for(const k in BASE_WIN) CFG.windows[k] = BASE_WIN[k]*L.win; }
+
+const cv = document.getElementById("c"), g = cv.getContext("2d");
+const W = cv.width, H = cv.height;
+const LANE_XS = [W/2-70, W/2+70], LANE_X = W/2, R = 34;   // 左右2レーン(LANE_Xは中央)
+const LANE_W = 112, SIDE_X = [56, W-56];                   // レーン幅 / 脇のキャラの位置
+const HIT_Y = () => CFG.flowDown ? H-190 : 190;
+const beatSec = 60 / CFG.bpm;
+
+// ============ 譜面(コードで生成) ============
+function buildChart(){
+  const notes = [];
+  const rollBars = LEVELS[level].rolls, rollBeats = level===3 ? 3 : 2;
+  const rollAt = bar => rollBars.includes(bar);
+  // 左右の割り当て: 前半は交互(左右左右)、後半は 左右右左 のくり返し
+  let seq = 0;
+  const add = (beat) => {
+    const lane = beat < 32 ? seq%2 : [0,1,1,0][seq%4];
+    seq++;
+    notes.push({ kind:"note", lane, t:(CFG.leadBeats + beat)*beatSec, hit:false, judged:false });
+  };
+  const patA = [0,1,2,3];
+  const patC = [0,0.5,1,2,2.5,3];
+  const patD = [0,0.5,1,1.5,2,2.5,3,3.5];
+  for(let bar=2; bar<CFG.bars-2; bar++){
+    if(rollAt(bar)){
+      const t = (CFG.leadBeats + bar*4)*beatSec;
+      notes.push({ kind:"roll", t, end:t+rollBeats*beatSec, hits:0, judged:false, hit:false });
+      // 連打の後ろ(余白)に1打だけ置く
+      add(bar*4 + rollBeats + 1);
+      continue;
+    }
+    let p;
+    if(bar<8) p = patA;
+    else if(bar<16) p = bar%2? patC:patA;
+    else if(bar<24) p = bar%4==3? patD:(bar%2? patC:patA);
+    else p = bar%2? patD:patC;
+    if(level===0){ if(bar<4) continue; p = p.filter(b=> b%2===0); }
+    else if(level===1){ p = p.filter(b=> b%1===0); }
+    else if(level===2){ if(p===patD) p = patC; }
+    else if(level===3){ if(bar>=8 && p===patC) p = patD; }
+    p.forEach(b=> add(bar*4+b));
+  }
+  notes.sort((a,b)=>a.t-b.t);
+  return notes;
+}
+
+// ============ 音(Web Audioで生成) ============
+let ac = null, master = null, songStart = 0, songLen = 0;
+function noiseBuf(){
+  const b = ac.createBuffer(1, ac.sampleRate*0.3, ac.sampleRate), d=b.getChannelData(0);
+  for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1; return b;
+}
+function kick(t){
+  const o=ac.createOscillator(), v=ac.createGain();
+  o.frequency.setValueAtTime(160,t); o.frequency.exponentialRampToValueAtTime(40,t+0.15);
+  v.gain.setValueAtTime(0.9,t); v.gain.exponentialRampToValueAtTime(0.001,t+0.2);
+  o.connect(v).connect(master); o.start(t); o.stop(t+0.25);
+}
+function noiseHit(t, dur, freq, vol, type){
+  const s=ac.createBufferSource(); s.buffer=nb;
+  const f=ac.createBiquadFilter(); f.type=type; f.frequency.value=freq;
+  const v=ac.createGain(); v.gain.setValueAtTime(vol,t); v.gain.exponentialRampToValueAtTime(0.001,t+dur);
+  s.connect(f).connect(v).connect(master); s.start(t); s.stop(t+dur+0.02);
+}
+function tone(t, freq, dur, vol, type="sawtooth"){
+  const o=ac.createOscillator(), v=ac.createGain(), f=ac.createBiquadFilter();
+  o.type=type; o.frequency.value=freq; f.type="lowpass"; f.frequency.value=1400;
+  v.gain.setValueAtTime(vol,t); v.gain.exponentialRampToValueAtTime(0.001,t+dur);
+  o.connect(f).connect(v).connect(master); o.start(t); o.stop(t+dur+0.02);
+}
+let nb;
+const midi = n => 440*Math.pow(2,(n-69)/12);
+const BASS = [45,45,48,43]; // Am - Am - C - G 的な進行(小節ごと)
+const LEAD = [69,72,76,72, 67,71,74,71];
+function scheduleSong(t0){
+  nb = noiseBuf();
+  const total = (CFG.leadBeats + CFG.bars*4)*2; // 8分単位
+  for(let i=0;i<total;i++){
+    const t = t0 + i*beatSec/2, beat = i/2, step=i%2;
+    const inLead = beat < CFG.leadBeats;
+    const bar = Math.floor((beat-CFG.leadBeats)/4);
+    if(inLead){ if(step==0) noiseHit(t,0.05,6000,0.3,"highpass"); continue; }  // カウント
+    if(step==0 && beat%1==0){
+      if(beat%2==0 || true) kick(t);
+    }
+    if(beat%2==1 && step==0) noiseHit(t,0.15,1800,0.5,"bandpass"); // スネア
+    if(step==1) noiseHit(t,0.05,7000,0.25,"highpass");              // ハット
+    const root = BASS[(bar+4)%4%BASS.length];
+    if(bar>=0) tone(t, midi(root-12), beatSec/2*0.9, 0.22, "square");
+    if(bar>=4 && bar<CFG.bars-2 && step==0 && (beat%0.5==0)){
+      const n = LEAD[(Math.floor(i/1))%LEAD.length] + (BASS[bar%4]-45);
+      tone(t, midi(n), beatSec*0.8, 0.07);
+    }
+  }
+  songLen = (CFG.leadBeats + CFG.bars*4)*beatSec;
+}
+function songTime(){ return ac.currentTime - songStart - CFG.offset; }
+function sfx(type){ // ヒット音
+  const t=ac.currentTime, o=ac.createOscillator(), v=ac.createGain();
+  o.frequency.value=type? 1400:260; o.type=type?"square":"sine"; v.gain.setValueAtTime(0.25,t); v.gain.exponentialRampToValueAtTime(0.001,t+0.08);
+  o.connect(v).connect(master); o.start(t); o.stop(t+0.06);
+}
+
+// ============ ゲーム状態 ============
+let state = "title"; // title | play | pause | result
+let notes = [], score, combo, maxCombo, counts, rollTotal, lastJudge = null, flash = [0,0], held = {};
+let frameN = 0, lastPress = [-99,-99];   // フレーム数(パラパラ用) / 各レーンが最後に叩かれたフレーム
+function start(){
+  if(!ac) ac = new (window.AudioContext||window.webkitAudioContext)();
+  if(master) master.disconnect();
+  master = ac.createGain(); master.gain.value=0.8; master.connect(ac.destination);
+  if(ac.state!=="running") ac.resume();
+  applyLevel(); CFG.speed = LEVELS[level].speed;
+  notes = buildChart(); score=0; combo=0; maxCombo=0; lastJudge=null; rollTotal=0;
+  counts={perfect:0,great:0,good:0,miss:0};
+  songStart = ac.currentTime + 0.5; scheduleSong(songStart);
+  state = "play";
+}
+function toTitle(){
+  if(master){ master.disconnect(); master=null; }
+  if(ac) ac.resume();
+  state="title";
+}
+function judge(kind, lane=0){
+  counts[kind]++; lastJudge = { kind, lane, t: performance.now() };
+  if(kind==="miss") combo=0; else { combo++; maxCombo=Math.max(maxCombo,combo); score += CFG.score[kind] + Math.min(combo,100)*5; }
+}
+function activeRoll(now){ return notes.find(n=> n.kind==="roll" && now>=n.t-0.05 && now<=n.end); }
+function press(lane){
+  if(state!=="play") return;
+  flash[lane]=1; lastPress[lane]=frameN;
+  const now = songTime();
+  const roll = activeRoll(now);
+  if(roll){ roll.hits++; rollTotal++; score += 300; sfx(lane); return; }   // 連打中は左右どちらでも加点
+  let best=null, bd=1e9;
+  for(const n of notes){
+    if(n.judged || n.kind!=="note" || n.lane!==lane) continue;
+    if(n.t-now > CFG.windows.good) break;
+    const d = Math.abs(n.t-now);
+    if(d<bd){ bd=d; best=n; }
+  }
+  if(!best || bd>CFG.windows.good) return;
+  best.judged=true; best.hit=true;
+  judge(bd<=CFG.windows.perfect?"perfect": bd<=CFG.windows.great?"great":"good", lane);
+  sfx(lane);
+}
+function update(){
+  if(state!=="play") return;
+  const now = songTime();
+  for(const n of notes){
+    if(n.judged) continue;
+    if(n.kind==="note" && now - n.t > CFG.windows.good){ n.judged=true; judge("miss", n.lane); }
+    else if(n.kind==="roll" && now > n.end){ n.judged=true; }
+  }
+  if(now > songLen + 1) finish();
+}
+function finish(){
+  state="result";
+  const total = notes.filter(n=>n.kind==="note").length;
+  const r = counts.perfect*1 + counts.great*0.7 + counts.good*0.4;
+  const acc = total? r/total : 0;
+  window.rank = acc>=0.95?"S": acc>=0.85?"A": acc>=0.7?"B":"C";
+  window.acc = acc;
+}
+
+// ============ 入力 ============
+function changeLevel(i){ level=(i+LEVELS.length)%LEVELS.length; CFG.speed=LEVELS[level].speed; }
+function pause(){ if(state==="play"){ state="pause"; ac.suspend(); } }
+function resume(){ if(state==="pause"){ state="play"; ac.resume(); } }
+addEventListener("keydown", e=>{
+  if(e.repeat) return;
+  if(state==="play" && e.code in KEY_LANE){ e.preventDefault(); held[e.code]=true; press(KEY_LANE[e.code]); return; }
+  if(state==="title"||state==="result"){
+    if(e.code==="ArrowLeft"||e.code==="ArrowUp"){ e.preventDefault(); changeLevel(level-1); return; }
+    if(e.code==="ArrowRight"||e.code==="ArrowDown"){ e.preventDefault(); changeLevel(level+1); return; }
+    const m=/^(Digit|Numpad)([1-4])$/.exec(e.code); if(m){ changeLevel(+m[2]-1); return; }
+    if(e.code==="Enter"||e.code==="Space"){ e.preventDefault(); start(); return; }
+    if(state==="result" && (e.code==="KeyT"||e.code==="Escape")){ toTitle(); return; }
+  }
+  if(e.code==="Escape"){ if(state==="play") pause(); else if(state==="pause") resume(); return; }
+  if(state==="pause"){
+    if(e.code==="KeyR"){ ac.resume(); start(); }
+    if(e.code==="KeyT"){ toTitle(); }
+  }
+  if(state==="title"||state==="pause"){
+    if(e.code==="BracketLeft") CFG.offset=+(CFG.offset-0.01).toFixed(3);
+    if(e.code==="BracketRight") CFG.offset=+(CFG.offset+0.01).toFixed(3);
+    if(e.code==="Minus") CFG.speed=Math.max(240,CFG.speed-40);
+    if(e.code==="Equal") CFG.speed=Math.min(900,CFG.speed+40);
+    if(e.code==="KeyH") CFG.flowDown=!CFG.flowDown;
+  }
+});
+addEventListener("keyup", e=>{ delete held[e.code]; });
+
+let buttons = [];
+function button(label,x,y,w,h,fn,color="#ffffff22",tc="#fff"){
+  buttons.push({x,y,w,h,fn});
+  g.fillStyle=color; g.fillRect(x,y,w,h);
+  g.strokeStyle="rgba(255,255,255,.5)"; g.lineWidth=1; g.strokeRect(x+.5,y+.5,w-1,h-1);
+  text(label,x+w/2,y+h/2+6,Math.min(18,h*0.5),tc);
+}
+function pointer(e){
+  const r=cv.getBoundingClientRect(), px=(e.clientX-r.left)*W/r.width, py=(e.clientY-r.top)*H/r.height;
+  for(const b of buttons) if(px>=b.x&&px<=b.x+b.w&&py>=b.y&&py<=b.y+b.h){ b.fn(); return true; }
+  return false;
+}
+cv.addEventListener("pointerdown", e=>{
+  if(pointer(e)) return;
+  if(state==="play"){   // タップでも叩ける(画面の左半分=左レーン、右半分=右レーン)
+    const r=cv.getBoundingClientRect(), lane=(e.clientX-r.left)<r.width/2 ? 0 : 1, k="pointer"+lane;
+    press(lane); held[k]=true; setTimeout(()=>delete held[k],100);
+  }
+});
+
+// ============ 描画 ============
+function text(s,x,y,size,color="#fff",align="center"){ g.fillStyle=color; g.font=`bold ${size}px system-ui,sans-serif`; g.textAlign=align; g.fillText(s,x,y); }
+function drum(x,y,alpha=1,dim=false,r=R){
+  g.globalAlpha=alpha;
+  g.beginPath(); g.arc(x,y,r,0,Math.PI*2); g.fillStyle=dim?"#555":RED; g.fill();
+  g.lineWidth=6*r/R; g.strokeStyle="#fff"; g.stroke();
+  g.beginPath(); g.arc(x,y,r*0.45,0,Math.PI*2); g.fillStyle=dim?"#777":"#ffd0c8"; g.fill();
+  g.globalAlpha=1;
+}
+// ---- パラパラアニメ: 8フレームごとに次のコマへ切り替わる(4コマの繰り返し) ----
+const FLIP_FRAMES = 8;
+function dancer(x, y, side, f, hit, now){
+  const yy = y + (f%2 ? -8 : 0);                       // コマごとに弾む
+  const col = side ? "#4dc3ff" : "#ff8a4d";
+  // 脚(コマで開閉)
+  g.strokeStyle="#ddd"; g.lineWidth=7; g.lineCap="round";
+  const sp = f<2 ? 10 : 22;
+  g.beginPath(); g.moveTo(x-8,yy+32); g.lineTo(x-sp,yy+62); g.moveTo(x+8,yy+32); g.lineTo(x+sp,yy+62); g.stroke();
+  // 胴
+  g.fillStyle=col; g.beginPath(); g.roundRect(x-17,yy-10,34,46,8); g.fill();
+  // 腕と撥(コマごとに 上→中→下→中。左右の腕は2コマずらす)
+  const ang = [-1.0,-0.2,0.9,-0.2];
+  for(const s of [-1,1]){
+    const a = hit ? 0.9 : ang[(f + (s>0?2:0))%4];
+    const sx = x+s*17, sy = yy-2, c=Math.cos(a)*s, d=Math.sin(a);
+    const hx=sx+c*32, hy2=sy+d*32;
+    g.strokeStyle=col; g.lineWidth=9; g.beginPath(); g.moveTo(sx,sy); g.lineTo(hx,hy2); g.stroke();
+    g.strokeStyle="#ffd24d"; g.lineWidth=5; g.beginPath(); g.moveTo(hx,hy2); g.lineTo(hx+c*22,hy2+d*22); g.stroke();
+  }
+  // 頭・はちまき・顔
+  g.fillStyle="#ffe0b8"; g.beginPath(); g.arc(x,yy-32,21,0,Math.PI*2); g.fill();
+  g.fillStyle="#e33"; g.fillRect(x-21,yy-42,42,8);
+  g.fillStyle="#222";
+  if(hit){ g.fillRect(x-11,yy-30,8,3); g.fillRect(x+3,yy-30,8,3); g.beginPath(); g.arc(x,yy-18,6,0,Math.PI); g.fill(); }  // >< と大きな口
+  else { g.beginPath(); g.arc(x-8,yy-28,3,0,7); g.arc(x+8,yy-28,3,0,7); g.fill(); g.fillRect(x-5,yy-17,10,3); }
+}
+function drawDancers(now){
+  const f = Math.floor(frameN/FLIP_FRAMES)%4;
+  for(let i=0;i<2;i++){
+    const hit = frameN-lastPress[i] < FLIP_FRAMES;     // 叩いた直後は「叩いたポーズ」
+    dancer(SIDE_X[i], 250, i, f, hit, now);
+    // 音符も2コマで入れ替わる
+    text(f%2?"♪":"♫", SIDE_X[i]+(i?-30:30), 170-(f%2?0:10), 26, "#ffd24d");
+  }
+}
+function levelSelect(y){
+  LEVELS.forEach((L,i)=>{
+    const yy=y+i*62, sel=i===level;
+    buttons.push({x:60,y:yy,w:360,h:54,fn:()=>changeLevel(i)});
+    g.fillStyle=sel? L.color : "rgba(255,255,255,0.08)"; g.fillRect(60,yy,360,54);
+    text(`${i+1}. ${L.name}`,78,yy+24,20,sel?"#111":"#aaa","left");
+    text("★".repeat(Math.min(L.star,5))+(L.star>5?"+":""),78,yy+44,13,sel?"#111":"#777","left");
+    text(L.desc,408,yy+34,13,sel?"#222":"#666","right");
+  });
+}
+const settingsLine = () => `音ズレ補正 [ ] : ${(CFG.offset*1000).toFixed(0)}ms   速度 - = : ${CFG.speed}   H: ${CFG.flowDown?"上→下":"下→上"}`;
+
+function draw(){
+  buttons = [];
+  g.clearRect(0,0,W,H);
+  const gr=g.createLinearGradient(0,0,0,H); gr.addColorStop(0,"#2a1020"); gr.addColorStop(1,"#0b0b16");
+  g.fillStyle=gr; g.fillRect(0,0,W,H);
+
+  if(state==="title"){
+    text("TAIKO BEAT",W/2,100,46);
+    drum(W/2,170,1,false,32);
+    levelSelect(225);
+    button("スタート (Enter)",W/2-120,490,240,52,start,RED);
+    text(`${KEY_LABEL}  (画面の左半分/右半分タップもOK)`,W/2,590,17,"#9ad");
+    text("左右のレーンの赤い玉を叩こう / 黄色い帯は連打(左右どちらでもOK)!",W/2,620,13,"#aaa");
+    text(settingsLine(),W/2,680,11,"#889");
+    return;
+  }
+  if(state==="result"){
+    text("RESULT",W/2,70,30);
+    text(window.rank,W/2,220,130,{S:"#ffd24d",A:"#6dff7a",B:"#4dc3ff",C:"#ccc"}[window.rank]);
+    text(`SCORE ${score}`,W/2,285,28);
+    text(`MAX COMBO ${maxCombo}   ACC ${(window.acc*100).toFixed(1)}%   連打 ${rollTotal}`,W/2,318,14,"#ccc");
+    const rows=[["PERFECT",counts.perfect,"#ffd24d"],["GREAT",counts.great,"#6dff7a"],["GOOD",counts.good,"#4dc3ff"],["MISS",counts.miss,"#ff4d6d"]];
+    rows.forEach((r,i)=>{ text(r[0],W/2-10,370+i*34,22,r[2],"right"); text(String(r[1]),W/2+20,370+i*34,22,"#fff","left"); });
+    text(`レベル: ${LEVELS[level].name}(1〜4 / ← → で変更)`,W/2,545,14,"#ccc");
+    button("もう一度 (Enter)",W/2-120,565,240,48,start,RED);
+    button("タイトルへ (T)",W/2-120,625,240,48,toTitle);
+    return;
+  }
+
+  const hy=HIT_Y(), dir=CFG.flowDown?1:-1, now=songTime();
+  const yOf = t => hy - dir*(t-now)*CFG.speed;
+  // 脇のキャラ(パラパラアニメ)
+  drawDancers(now);
+  // レーン(左右2本)
+  const laneFlash = [0,1].map(i=>{ flash[i]=Math.max(0,flash[i]-0.08); return flash[i]; });
+  for(let i=0;i<2;i++){
+    const lx=LANE_XS[i];
+    g.fillStyle="#1b1b24"; g.fillRect(lx-LANE_W/2,0,LANE_W,H);
+    g.fillStyle="#2c2c38"; g.fillRect(lx-LANE_W/2,hy-R-14,LANE_W,(R+14)*2);
+    g.beginPath(); g.arc(lx,hy,R+4,0,Math.PI*2); g.lineWidth=4; g.strokeStyle="rgba(255,255,255,0.7)"; g.stroke();
+    if(laneFlash[i]>0){ g.beginPath(); g.arc(lx,hy,R+4,0,Math.PI*2); g.fillStyle="rgba(255,74,61,"+(laneFlash[i]*0.6)+")"; g.fill(); }
+  }
+  // 連打ノーツ(帯・左右レーンをまたぐ。どちらのボタンでもOK)
+  const rx0=LANE_XS[0]-46, rw=LANE_XS[1]-LANE_XS[0]+92;
+  for(const n of notes){
+    if(n.kind!=="roll") continue;
+    const y1=yOf(n.t), y2=yOf(n.end), top=Math.min(y1,y2), h=Math.abs(y2-y1);
+    if(top>H||top+h<0) continue;
+    const act = now>=n.t && now<=n.end;
+    g.fillStyle=act? "#fff2a8":ROLL; g.fillRect(rx0,top,rw,h);
+    g.strokeStyle="#fff"; g.lineWidth=4; g.strokeRect(rx0,top,rw,h);
+    text("連打!",LANE_X,top+h/2+6,20,"#7a4d00");
+  }
+  // 通常ノーツ(奥のものから描く)
+  for(let i=notes.length-1;i>=0;i--){
+    const n=notes[i]; if(n.kind!=="note"||n.hit) continue;
+    const y=yOf(n.t);
+    if(y<-R||y>H+R) continue;
+    drum(LANE_XS[n.lane],y,1,n.judged);
+  }
+  // 連打カウンタ
+  const ar = activeRoll(now);
+  if(ar){ text(ar.hits,LANE_X,hy-dir*110,54,ROLL); text("HIT",LANE_X,hy-dir*110+22,14,"#ccc"); }
+  // ボタン表示(左右1つずつ)
+  const ky = CFG.flowDown ? hy+R+70 : hy-R-70;
+  const pressed = [0,1].map(i=> Object.keys(held).some(k=> KEY_LANE[k]===i || k==="pointer"+i));
+  [["F",0],["J",1]].forEach(([label,i])=>{
+    const on=pressed[i];
+    g.beginPath(); g.roundRect(LANE_XS[i]-52,ky-26,104,52,12); g.fillStyle=on?RED:"#20202c"; g.fill();
+    g.lineWidth=3; g.strokeStyle=RED; g.stroke();
+    text(label,LANE_XS[i],ky+10,28,on?"#fff":RED);
+  });
+  // HUD
+  text(`SCORE ${score}`,16,32,22,"#fff","left");
+  text(LEVELS[level].name,W-16,32,18,LEVELS[level].color,"right");
+  if(combo>=2){ text(combo,SIDE_X[0],H/2+90,48,"rgba(255,255,255,0.85)"); text("COMBO",SIDE_X[0],H/2+112,13,"#ccc"); }
+  if(lastJudge && performance.now()-lastJudge.t<500){
+    const c={perfect:"#ffd24d",great:"#6dff7a",good:"#4dc3ff",miss:"#ff4d6d"}[lastJudge.kind];
+    text(lastJudge.kind.toUpperCase(),LANE_XS[lastJudge.lane],hy+dir*-(R+30),22,c);
+  }
+  const prog = Math.max(0,Math.min(1,now/songLen));
+  g.fillStyle="#223"; g.fillRect(0,H-6,W,6); g.fillStyle="#6af"; g.fillRect(0,H-6,W*prog,6);
+  if(state==="play") button("ポーズ (Esc)",W-122,H-40,112,28,pause);
+  if(now<0) text(`${Math.ceil(-now)}`,W/2,H/2,64,"rgba(255,255,255,.4)");
+  if(state==="pause"){
+    g.fillStyle="rgba(0,0,0,0.78)"; g.fillRect(0,0,W,H);
+    text("PAUSE",W/2,200,40);
+    button("再開 (Esc)",W/2-120,250,240,48,resume,"#3d9bff");
+    button("やり直し (R)",W/2-120,312,240,48,()=>{ ac.resume(); start(); });
+    button("タイトルへ戻る (T)",W/2-120,374,240,48,toTitle);
+    text(settingsLine(),W/2,470,11,"#889");
+  }
+}
+function loop(){ frameN++; update(); draw(); requestAnimationFrame(loop); }
+loop();
+</script>
+<script src="../assets/back-button.js"></script>
+</body>
+</html>

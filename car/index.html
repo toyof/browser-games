@@ -1,0 +1,1352 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>ラインロード</title>
+<style>
+  html,body{margin:0;height:100%;background:#1b2330;color:#fff;font-family:sans-serif;overflow:hidden;touch-action:none}
+  #wrap{display:flex;flex-direction:column;height:100%;align-items:center;gap:4px;padding:4px;box-sizing:border-box}
+  #mid{flex:1;min-height:0;width:100%;display:flex;gap:10px;align-items:flex-start;justify-content:center}
+  #area{flex:none;display:flex}
+  #side{display:flex;flex-direction:column;justify-content:flex-start;gap:10px}
+  #side button{width:120px;box-sizing:border-box;padding:16px 0;font-size:16px;font-weight:bold;text-align:center}
+  canvas{background:#9fd8ff;touch-action:none;border-radius:6px;display:block}
+  #bar{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;align-items:center}
+  #stages,#worlds{display:flex;flex-wrap:wrap;gap:3px;justify-content:center;max-width:100%;flex-basis:100%}
+  #stages button{font-size:12px;padding:4px 0;width:34px;border-radius:5px}
+  #worlds button{font-size:12px;padding:4px 8px;border-radius:5px}
+  button{font-size:14px;padding:6px 12px;border:0;border-radius:8px;background:#3a8dff;color:#fff}
+  button.sub{background:#55627a}
+  button.on{background:#ff9a3a}
+  #loadout{display:flex;gap:10px;align-items:center;font-size:13px;flex-basis:100%;justify-content:center}
+  #pv{border-radius:6px;background:#2b3a52}
+  #lo-stats{font-size:12px;line-height:1.5;margin-top:3px;text-align:left}
+  select{font-size:13px;padding:4px;border-radius:6px}
+  #info{font-size:13px;opacity:.9;flex-basis:100%;text-align:center}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="bar">
+    <div id="worlds"></div>
+    <div id="stages"></div>
+    <button id="tool" class="sub" style="display:none">道具: 道</button>
+    <button id="spd" class="sub">速度 ×1</button>
+    <button id="bgm" class="sub">♪ ON</button>
+    <div id="loadout"><canvas id="pv" width="170" height="78"></canvas><div id="lo-r">車 <select id="carSel"></select> タイヤ <select id="tireSel"></select><div id="lo-stats"></div></div></div>
+    <span id="info"></span>
+  </div>
+  <div id="mid">
+    <div id="area"><canvas id="c" width="900" height="500"></canvas></div>
+    <div id="side">
+      <button id="go">スタート</button>
+      <button id="reset" class="sub">線をリセット</button>
+    </div>
+  </div>
+</div>
+<script>
+const W = 900, H = 500, COL = 4, N = W / COL + 1, PIT = H + 300;
+let R = 20; // 車の半径(タイヤで変わる)
+// ---- 車とタイヤ ----
+const CARS = [
+  { name: '標準', maxv: 200, accel: 700, mass: 1, jump: 430, body: '#e53935', roof: '#ffcdd2', st: [3, 3, 3, 3], desc: 'バランス型。どの面でも基準になる' },
+  { name: 'スポーツ', maxv: 230, accel: 700, mass: 0.7, jump: 430, body: '#2f80ed', roof: '#cfe3ff', st: [5, 3, 1, 3], desc: '速くて軽い。押し合いや風に弱い' },
+  { name: 'トラック', maxv: 170, accel: 800, mass: 2.2, jump: 380, body: '#f2a100', roof: '#ffe9b0', st: [1, 4, 5, 2], desc: '重くて遅い。押し合いと風に強く、坂に強い' },
+  { name: 'バギー', maxv: 200, accel: 850, mass: 1, jump: 500, body: '#43a047', roof: '#d4efd6', st: [3, 4, 3, 5], desc: '登坂とジャンプが得意。ぴょんぴょん跳ねる' },
+];
+const TIRES = [
+  { name: '標準', r: 20, vmul: 1, amul: 1, ice: false, desc: 'ふつうのタイヤ' },
+  { name: '大径', r: 24, vmul: 1, amul: 1, ice: false, desc: '大きいブロックタイヤ。段差と小さな穴に強い' },
+  { name: 'スパイク', r: 20, vmul: 1, amul: 0.9, ice: true, desc: '鋲つき。氷の上でも進める。少し加速が弱い' },
+  { name: 'スリック', r: 20, vmul: 1.1, amul: 0.7, ice: false, desc: 'つるつる。最高速は上がるが加速が弱い' },
+  { name: '炎', r: 20, vmul: 1.05, amul: 1.2, ice: false, desc: '燃えるタイヤ。加速が強く、最高速も少し上がる' },
+];
+let carSel = 0, tireSel = 0, LD = { maxv: 200, accel: 700, mass: 1, jump: 430, r: 20, ice: false };
+try { carSel = Math.min(CARS.length - 1, Math.max(0, +localStorage.getItem('lr_car') || 0)); tireSel = Math.min(TIRES.length - 1, Math.max(0, +localStorage.getItem('lr_tire') || 0)); } catch (e) {}
+function loadout() { const c = CARS[carSel], t = TIRES[tireSel]; return { maxv: c.maxv * t.vmul, accel: c.accel * t.amul, mass: c.mass, jump: c.jump, r: t.r, ice: t.ice }; }
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+
+const smooth = t => { t = Math.max(0, Math.min(1, t)); return t * t * (3 - 2 * t); };
+
+// 山: 中心c・半幅w・頂上y(base=基準の高さ)。範囲外はbase
+const mt = (x, c, w, peak, base = 380) => base - (base - peak) * smooth(1 - Math.abs(x - c) / w);
+// 区間指定: [[x0,x1,y],...] 範囲外は def
+const spans = (x, list, def) => { for (const [a, b, y] of list) if (x >= a && x < b) return y; return def; };
+
+const STAGES = [
+  { name: '1 谷を渡れ', hint: '自走。谷に道を引こう', mode: 'drive', tool: 'road',
+    start: { x: 70 }, goal: { x: 830 },
+    height: x => (x >= 260 && x <= 640) ? PIT : 320 },
+  { name: '2 山を削れ', hint: '重力。鉄(灰色)は削れない。削りすぎに注意', mode: 'gravity', tool: 'carve',
+    iron: [{ x0: 480, x1: 560, y0: 215, y1: 420 }],
+    start: { x: 110 }, goal: { x: 840 },
+    height: x => {
+      if (x < 90) return 180;
+      if (x < 300) return 180 + 220 * smooth((x - 90) / 210);
+      if (x < 520) return 400 - 290 * smooth((x - 340) / 180);
+      if (x < 720) return 110 + 290 * smooth((x - 520) / 200);
+      return 400;
+    } },
+  { name: '3 段差', hint: '自走。崖に坂道を架けよう', mode: 'drive', tool: 'road',
+    start: { x: 60 }, goal: { x: 840 },
+    height: x => spans(x, [[0, 200, 380], [200, 400, 300], [400, 600, 220]], 140) },
+  { name: '4 急な山', hint: '自走。中の鉄は削れない。坂を作って登ろう', mode: 'drive', tool: 'carve',
+    iron: [{ x0: 400, x1: 460, y0: 260, y1: 420 }],
+    start: { x: 60 }, goal: { x: 810 },
+    height: x => mt(x, 430, 170, 60) },
+  { name: '5 滑り台', hint: '重力。落下の勢いで届く滑り台を', mode: 'gravity', tool: 'road',
+    start: { x: 50 }, goal: { x: 820 },
+    height: x => x < 150 ? 130 + 30 * (x / 150) : (x < 450 ? PIT : 300) },
+  { name: '6 二つ山', hint: '重力。鉄より下は削れない。削る高さを考えよう', mode: 'gravity', tool: 'carve',
+    iron: [{ x0: 560, x1: 640, y0: 220, y1: 420 }],
+    start: { x: 110 }, goal: { x: 885 },
+    height: x => {
+      const b = x < 90 ? 150 : x < 260 ? 150 + 250 * smooth((x - 90) / 170) : 400;
+      return Math.min(b, mt(x, 420, 100, 330, 400), mt(x, 620, 250, 130, 400));
+    } },
+  { name: '7 島渡り', hint: '自走。島と島を道でつなごう', mode: 'drive', tool: 'road',
+    start: { x: 60 }, goal: { x: 850 },
+    height: x => spans(x, [[0, 200, 350], [200, 320, PIT], [320, 460, 250], [460, 600, PIT], [600, 720, 380], [720, 800, PIT]], 300) },
+  { name: '8 草原の山', hint: '自走。鉄は削れない。坂を作って登ろう', mode: 'drive', tool: 'carve', start: { x: 50 }, goal: { x: 699 },
+    iron: [{ x0: 379, x1: 439, y0: 260, y1: 420 }],
+    height: x => mt(x, 409, 180, 60) },
+  { name: '9 草原の滑り台', hint: '重力。落下の勢いで届く滑り台を引こう', mode: 'gravity', tool: 'road', start: { x: 50 }, goal: { x: 820 },
+    height: x => x < 176 ? 130 + 30 * (x / 176) : (x < 504 ? PIT : 339) },
+  { name: '10 総合', hint: '自走。鉄は削れない。山を削り、谷に道を架けよう(道具切替)', mode: 'drive', tool: 'both',
+    iron: [{ x0: 240, x1: 320, y0: 300, y1: 420 }],
+    start: { x: 50 }, goal: { x: 850 },
+    height: x => spans(x, [[480, 640, PIT]], mt(x, 280, 130, 170)) },
+
+  // ---- 11〜20: 新ギミック ----
+  { name: '11 ギミックのジャンプ台', hint: '自走。ジャンプ台で跳び、着地の足場を作ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 821 },
+    zones: [{ type: 'bounce', x0: 284, x1: 324, y0: 343, y1: 363, v: 650 }],
+    area: [{ x0: 504, y0: 291, x1: 767, y1: 381 }],
+    height: x => spans(x, [[354,697,PIT]], 351) },
+  { name: '12 ジャンプ入門', hint: 'ジャンプ車。穴や壁(土管)の手前で自動ジャンプ。足場を作ろう', mode: 'jump', tool: 'road',
+    area: [{ x0: 300, y0: 290, x1: 500, y1: 400 }],
+    start: { x: 60 }, goal: { x: 850 },
+    pipes: [{ x0: 700, x1: 740, y0: 290, y1: 600 }],
+    height: x => (x >= 230 && x < 560) ? PIT : 350 },
+  { name: '13 溝と土管', hint: '自走。溝と土管を越える橋を引こう', mode: 'drive', tool: 'road',
+    start: { x: 50 }, goal: { x: 840 },
+    pipes: [{ x0: 330, x1: 370, y0: 260, y1: 600 }, { x0: 560, x1: 600, y0: 250, y1: 600 }],
+    height: x => ((x >= 200 && x < 270) || (x >= 420 && x < 490)) ? PIT : 340 },
+  { name: '14 パトロール', hint: '自走。地面を掘って、往復する壁の下をくぐろう', mode: 'drive', tool: 'carve',
+    area: [{ x0: 230, y0: 350, x1: 730, y1: 440 }],
+    start: { x: 40 }, goal: { x: 850 },
+    movers: [{ x: 480, y: 270, w: 70, h: 90, ax: 150, ay: 0, per: 5, ph: 0 }],
+    height: () => 360 },
+  { name: '15 落石', hint: '自走。転がってくる大岩に当たるな', mode: 'drive', tool: 'road',
+    start: { x: 40 }, goal: { x: 560 },
+    boulder: { x: 672, y: 170, r: 36, at: 0.2 },
+    height: x => x < 600 ? 380 : x < 700 ? 380 - 180 * smooth((x - 600) / 100) : 200 },
+  { name: '16 パッドで大ジャンプ', hint: 'ジャンプ車。パッドで加速して穴を越え、土管を越える橋を', mode: 'jump', tool: 'road',
+    area: [{ x0: 580, y0: 230, x1: 890, y1: 400 }],
+    start: { x: 50 }, goal: { x: 870 },
+    pads: [{ x: 170 }],
+    pipes: [{ x0: 760, x1: 800, y0: 270, y1: 600 }],
+    height: x => (x >= 250 && x < 550) ? PIT : 380 },
+  { name: '17 ギミックのジャンプ山', hint: 'ジャンプ車。鉄は削れない。坂を作って登ろう', mode: 'jump', tool: 'carve', start: { x: 50 }, goal: { x: 707 },
+    iron: [{ x0: 387, x1: 447, y0: 240, y1: 420 }],
+    height: x => mt(x, 417, 180, 60) },
+  { name: '18 島ジャンプ', hint: 'ジャンプ車。パッドの加速でも届かない。足場を置こう', mode: 'jump', tool: 'road',
+    area: [{ x0: 520, y0: 330, x1: 740, y1: 400 }],
+    start: { x: 50 }, goal: { x: 850 },
+    pads: [{ x: 170 }],
+    height: x => (x >= 300 && x < 780) ? PIT : 380 },
+  { name: '19 動く障害物と溝', hint: '自走。動く壁・土管・溝をまとめて越える橋を', mode: 'drive', tool: 'road',
+    start: { x: 40 }, goal: { x: 850 },
+    movers: [{ x: 400, y: 260, w: 60, h: 100, ax: 120, ay: 0, per: 4, ph: 1 }],
+    pipes: [{ x0: 650, x1: 690, y0: 270, y1: 600 }],
+    height: x => (x >= 520 && x < 600) ? PIT : 360 },
+  { name: '20 ギミックの壁', hint: '自走。地面を掘って、往復する壁の下をくぐろう', mode: 'drive', tool: 'carve', start: { x: 40 }, goal: { x: 850 },
+    area: [{ x0: 255, y0: 356, x1: 813, y1: 446 }],
+    movers: [{ x: 499, y: 278, w: 70, h: 88, ax: 154, ay: 0, per: 5, ph: 0 }],
+    height: () => 366 },
+
+  // ---- ワールド3: 砂漠 (21〜30) ----
+  { name: '21 流砂', hint: '自走。流砂は進めない。上を渡る橋を引こう', mode: 'drive', tool: 'road',
+    start: { x: 50 }, goal: { x: 840 },
+    zones: [{ type: 'sand', x0: 250, x1: 560, y0: 300, y1: 420 }],
+    height: () => 380 },
+  { name: '22 追い風', hint: '重力。風に乗ってゴールの高台へ', mode: 'gravity', tool: 'road',
+    start: { x: 50 }, goal: { x: 830 },
+    zones: [{ type: 'wind', x0: 140, x1: 700, y0: 0, y1: 600, fx: 450 }],
+    height: x => x < 150 ? 150 + 25 * (x / 150) : (x < 700 ? PIT : 95) },
+  { name: '23 風車', hint: '自走。風車の上昇気流で高台に登ろう', mode: 'drive', tool: 'road',
+    area: [{ x0: 120, y0: 330, x1: 320, y1: 400 }],
+    start: { x: 50 }, goal: { x: 800 },
+    zones: [{ type: 'fan', x0: 290, x1: 450, y0: 170, y1: 420, fy: -1700 }],
+    height: x => (x >= 200 && x < 280) ? PIT : (x < 450 ? 380 : 200) },
+  { name: '24 ベルトコンベア', hint: '重力。ベルトが運んでくれる。間の穴に橋を', mode: 'gravity', tool: 'road',
+    start: { x: 50 }, goal: { x: 850 },
+    zones: [{ type: 'belt', x0: 20, x1: 300, y0: 300, y1: 420, bs: 250 }, { type: 'belt', x0: 480, x1: 720, y0: 300, y1: 420, bs: 250 }],
+    height: x => (x >= 300 && x < 480) ? PIT : 380 },
+  { name: '25 爆発岩', hint: '重力。勢いがあれば爆発岩は壊せる(壊すと減速)。鉄は削れない', mode: 'gravity', tool: 'carve',
+    start: { x: 80 }, goal: { x: 860 },
+    iron: [{ x0: 510, x1: 610, y0: 300, y1: 420 }],
+    breaks: [{ x0: 330, x1: 370, y0: 300, y1: 420, need: 380 }],
+    height: x => { const b = x < 60 ? 100 : x < 300 ? 100 + 300 * smooth((x - 60) / 240) : 400; return Math.min(b, mt(x, 560, 140, 170, 400)); } },
+  { name: '26 サボテン道', hint: 'ジャンプ車。高いサボテンは橋で越えよう', mode: 'jump', tool: 'road',
+    start: { x: 50 }, goal: { x: 850 },
+    pipes: [{ x0: 230, x1: 260, y0: 300, y1: 600, cactus: true }, { x0: 520, x1: 550, y0: 250, y1: 600, cactus: true }, { x0: 700, x1: 730, y0: 300, y1: 600, cactus: true }],
+    height: () => 360 },
+  { name: '27 砂丘', hint: '自走。鉄は削れない。三つの砂丘に緩い坂を削ろう', mode: 'drive', tool: 'carve',
+    start: { x: 40 }, goal: { x: 860 },
+    iron: [{ x0: 170, x1: 230, y0: 305, y1: 420 }, { x0: 420, x1: 480, y0: 305, y1: 420 }, { x0: 670, x1: 730, y0: 305, y1: 420 }],
+    height: x => Math.min(mt(x, 200, 110, 180), mt(x, 450, 110, 120), mt(x, 700, 110, 180)) },
+  { name: '28 砂漠の総合', hint: 'ジャンプ車。流砂は橋で渡り、鉄のある山は削ろう(道具切替)', mode: 'jump', tool: 'both',
+    area: [{ x0: 30, y0: 280, x1: 395, y1: 400, tool: 'road' }, { x0: 395, y0: 280, x1: 660, y1: 400, tool: 'carve' }],
+    start: { x: 40 }, goal: { x: 860 },
+    iron: [{ x0: 490, x1: 550, y0: 300, y1: 420 }],
+    zones: [{ type: 'sand', x0: 120, x1: 330, y0: 300, y1: 420 }],
+    height: x => mt(x, 520, 100, 90) },
+  { name: '29 砂漠のベルト', hint: '重力。ベルトが運んでくれる。間の穴に橋を', mode: 'gravity', tool: 'road', start: { x: 50 }, goal: { x: 850 },
+    zones: [{ type: 'belt', x0: 20, x1: 305, y0: 300, y1: 420, bs: 220 }, { type: 'belt', x0: 477, x1: 717, y0: 300, y1: 420, bs: 220 }],
+    height: x => spans(x, [[305,477,PIT]], 380) },
+  { name: '30 砂嵐の大岩', hint: '自走。大岩・サボテン・流砂・突風', mode: 'drive', tool: 'road',
+    start: { x: 40 }, goal: { x: 560 },
+    boulder: { x: 672, y: 170, r: 36, at: 0.2 },
+    pipes: [{ x0: 250, x1: 280, y0: 270, y1: 600, cactus: true }],
+    zones: [{ type: 'sand', x0: 100, x1: 200, y0: 335, y1: 420 }, { type: 'wind', x0: 300, x1: 560, y0: 0, y1: 500, fx: -300, per: 3, duty: 0.5, hazard: true }],
+    height: x => x < 600 ? 380 : x < 700 ? 380 - 180 * smooth((x - 600) / 100) : 200 },
+  // <<GENERATED-START>>
+  // tools/gen.js が生成(ワールド4〜10)。直接は編集しない
+  { name: '31 雪山の氷', hint: '自走。氷の坂で加速する。穴の手前に飛び出す坂を作って飛び越えよう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 833 },
+    area: [{ x0: 291, y0: 261, x1: 471, y1: 391 }],
+    zones: [{ type: 'ice', x0: 90, x1: 330, y0: 0, y1: 500 }],
+    stars: [{ x: 141, y: 174 }],
+    height: x => x < 80 ? 169 : x < 330 ? 169 + 212 * smooth((x - 80) / 250) : (x >= 461 && x < 732 ? PIT : 381) },
+  { name: '32 雪山の氷の壁', hint: '自走。氷の壁は、炎で熱くなった車なら溶ける。炎を通って氷の壁へ向かおう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 751 },
+    zones: [{ type: 'fire', x0: 491, x1: 554, y0: 312, y1: 382 }],
+    breaks: [{ x0: 576, x1: 604, y0: 0, y1: 372, need: 0, hot: true }],
+    stars: [{ x: 276, y: 347 }],
+    height: x => spans(x, [[304,491,PIT]], 372) },
+  { name: '33 雪山のジェットコースター', hint: '重力。ジェットコースター! 頂上のスイッチを押すと扉が開く。丘を描いてスイッチを通ろう 星を取ろう', mode: 'gravity', tool: 'road', start: { x: 50 }, goal: { x: 812 },
+    switches: [{ x0: 350, y0: 210, x1: 394, y1: 224, door: 0 }],
+    doors: [{ x0: 708, x1: 736, y0: -20, y1: 361 }],
+    stars: [{ x: 227, y: 167 }],
+    height: x => x < 163 ? 125 + 30 * (x / 163) : (x < 638 ? PIT : 361) },
+  { name: '34 雪山の氷 2', hint: '自走。氷の坂で加速する。穴の手前に飛び出す坂を作って飛び越えよう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 824 },
+    area: [{ x0: 283, y0: 264, x1: 463, y1: 394 }],
+    zones: [{ type: 'ice', x0: 90, x1: 330, y0: 0, y1: 500 }],
+    stars: [{ x: 140, y: 141 }],
+    height: x => x < 80 ? 133 : x < 330 ? 133 + 251 * smooth((x - 80) / 250) : (x >= 453 && x < 707 ? PIT : 384) },
+  { name: '35 雪山の割れる床', hint: '自走。割れる床は乗って少しすると落ちる。床と床の間に道を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    crumbles: [{ x0: 326, x1: 387, y0: 365, y1: 425, delay: 0.6 }, { x0: 474, x1: 535, y0: 365, y1: 425, delay: 0.6 }, { x0: 622, x1: 683, y0: 365, y1: 425, delay: 0.6 }],
+    area: [{ x0: 229, y0: 325, x1: 336, y1: 385 }, { x0: 377, y0: 325, x1: 484, y1: 385 }, { x0: 525, y0: 325, x1: 632, y1: 385 }, { x0: 673, y0: 325, x1: 790, y1: 385 }],
+    stars: [{ x: 535, y: 339 }],
+    height: x => spans(x, [[239,770,PIT]], 365) },
+  { name: '36 雪山の氷の壁 2', hint: '自走。氷の壁は、炎で熱くなった車なら溶ける。炎を通って氷の壁へ向かおう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 735 },
+    zones: [{ type: 'fire', x0: 499, x1: 573, y0: 313, y1: 383 }],
+    breaks: [{ x0: 595, x1: 623, y0: 0, y1: 373, need: 0, hot: true }],
+    stars: [{ x: 276, y: 348 }],
+    height: x => spans(x, [[302,499,PIT]], 373) },
+  { name: '37 雪山の炎', hint: '自走。炎の上を渡る橋を引こう。炎に長く触れると燃える 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 750 },
+    zones: [{ type: 'fire', x0: 321, x1: 608, y0: 303, y1: 373 }],
+    stars: [{ x: 317, y: 200 }],
+    height: () => 363 },
+  { name: '38 雪山の雪玉', hint: '自走。雪玉は転がるほど大きくなる。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 561 },
+    rocks: [{ x: 683, y: 166, r: 26, at: 0.3, grow: 14, rmax: 58 }],
+    stars: [{ x: 232, y: 202 }],
+    height: x => x < 611 ? 368 : x < 711 ? 368 - 172 * smooth((x - 611) / 100) : 196 },
+  { name: '39 雪山のジェットコースター 2', hint: '重力。ジェットコースター! 頂上のスイッチを押すと扉が開く。丘を描いてスイッチを通ろう 星を取ろう', mode: 'gravity', tool: 'road', start: { x: 50 }, goal: { x: 804 },
+    switches: [{ x0: 406, y0: 188, x1: 450, y1: 202, door: 0 }],
+    doors: [{ x0: 701, x1: 729, y0: -20, y1: 366 }],
+    stars: [{ x: 128, y: 103 }],
+    height: x => x < 160 ? 101 + 30 * (x / 160) : (x < 631 ? PIT : 366) },
+  { name: '40 雪山の氷の壁 3', hint: '自走。氷の壁は、炎で熱くなった車なら溶ける。炎を通って氷の壁へ向かおう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 738 },
+    zones: [{ type: 'fire', x0: 493, x1: 563, y0: 302, y1: 372 }],
+    breaks: [{ x0: 585, x1: 613, y0: 0, y1: 362, need: 0, hot: true }],
+    stars: [{ x: 277, y: 337 }],
+    height: x => spans(x, [[308,493,PIT]], 362) },
+  { name: '41 海の水', hint: '自走。水は進めない。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 778 },
+    zones: [{ type: 'water', x0: 278, x1: 598, y0: 304, y1: 424 }],
+    stars: [{ x: 279, y: 247 }],
+    height: () => 384 },
+  { name: '42 海の吸い込み', hint: '自走。吸い込みの中心に近づくと失敗。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 784 },
+    zones: [{ type: 'pull', x0: 326, x1: 666, y0: 199, y1: 539, cx: 496, cy: 369, rad: 170, k: 1100, core: 40 }],
+    stars: [{ x: 343, y: 191 }],
+    height: () => 369 },
+  { name: '43 海の水 2', hint: '自走。水は進めない。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 696 },
+    zones: [{ type: 'water', x0: 269, x1: 537, y0: 304, y1: 424 }],
+    stars: [{ x: 262, y: 247 }],
+    height: () => 384 },
+  { name: '44 海の島', hint: '自走。島と島を道でつなごう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 836 },
+    stars: [{ x: 581, y: 250 }],
+    height: x => spans(x, [[225,452,PIT],[452,594,275],[594,706,PIT]], 343) },
+  { name: '45 海の吸い込み 2', hint: '自走。吸い込みの中心に近づくと失敗。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 731 },
+    zones: [{ type: 'pull', x0: 244, x1: 584, y0: 199, y1: 539, cx: 414, cy: 369, rad: 170, k: 1100, core: 40 }],
+    stars: [{ x: 262, y: 192 }],
+    height: () => 369 },
+  { name: '46 海の割れる床', hint: '自走。割れる床は乗って少しすると落ちる。床と床の間に道を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    crumbles: [{ x0: 312, x1: 381, y0: 373, y1: 433, delay: 0.6 }, { x0: 464, x1: 533, y0: 373, y1: 433, delay: 0.6 }, { x0: 616, x1: 685, y0: 373, y1: 433, delay: 0.6 }],
+    area: [{ x0: 219, y0: 333, x1: 322, y1: 393 }, { x0: 371, y0: 333, x1: 474, y1: 393 }, { x0: 523, y0: 333, x1: 626, y1: 393 }, { x0: 675, y0: 333, x1: 788, y1: 393 }],
+    stars: [{ x: 536, y: 347 }],
+    height: x => spans(x, [[229,768,PIT]], 373) },
+  { name: '47 海の水 3', hint: '自走。水は進めない。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 687 },
+    zones: [{ type: 'water', x0: 251, x1: 541, y0: 287, y1: 407 }],
+    stars: [{ x: 242, y: 231 }],
+    height: () => 367 },
+  { name: '48 海のジャンプ', hint: 'ジャンプ車。穴や壁の手前で自動ジャンプ。足場を作ろう 星を取ろう', mode: 'jump', tool: 'road', start: { x: 50 }, goal: { x: 790 },
+    area: [{ x0: 282, y0: 307, x1: 502, y1: 407 }],
+    stars: [{ x: 536, y: 251 }],
+    height: x => spans(x, [[222,557,PIT]], 377) },
+  { name: '49 海の谷', hint: '自走。谷に道を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 534 },
+    stars: [{ x: 195, y: 345 }],
+    height: x => spans(x, [[224,396,PIT]], 370) },
+  { name: '50 海の吸い込み 3', hint: '自走。吸い込みの中心に近づくと失敗。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 821 },
+    zones: [{ type: 'pull', x0: 332, x1: 672, y0: 186, y1: 526, cx: 502, cy: 356, rad: 170, k: 1100, core: 40 }],
+    stars: [{ x: 345, y: 179 }],
+    height: () => 356 },
+  { name: '51 ジャングルと火山の溶岩', hint: '自走。溶岩に触れたら失敗。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 692 },
+    zones: [{ type: 'lava', x0: 289, x1: 565, y0: 319, y1: 404 }],
+    stars: [{ x: 282, y: 227 }],
+    height: () => 364 },
+  { name: '52 ジャングルと火山のジャンプ台', hint: '自走。ジャンプ台で跳び、着地の足場を作ろう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 856 },
+    zones: [{ type: 'bounce', x0: 274, x1: 314, y0: 354, y1: 374, v: 650 }],
+    area: [{ x0: 494, y0: 302, x1: 793, y1: 392 }],
+    stars: [{ x: 421, y: 109 }],
+    height: x => spans(x, [[344,723,PIT]], 362) },
+  { name: '53 ジャングルと火山のトランポリン', hint: '自走。ジャンプ台(トランポリン)で島から島へ跳ぶ。最初の隙間に道を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    zones: [{ type: 'bounce', x0: 326, x1: 380, y0: 358, y1: 378, v: 560 }, { type: 'bounce', x0: 529, x1: 583, y0: 358, y1: 378, v: 560 }, { type: 'bounce', x0: 732, x1: 786, y0: 358, y1: 378, v: 560 }],
+    area: [{ x0: 188, y0: 316, x1: 338, y1: 386 }],
+    stars: [{ x: 677, y: 166 }],
+    height: x => spans(x, [[228,318,PIT],[388,521,PIT],[591,724,PIT],[794,957,PIT]], 366) },
+  { name: '54 ジャングルと火山の落石', hint: '自走。転がってくる大岩に当たるな 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 568 },
+    rocks: [{ x: 687, y: 155, r: 36, at: 0.2 }],
+    stars: [{ x: 232, y: 218 }],
+    height: x => x < 615 ? 384 : x < 715 ? 384 - 199 * smooth((x - 615) / 100) : 185 },
+  { name: '55 ジャングルと火山の割れる床', hint: '自走。割れる床は乗って少しすると落ちる。床と床の間に道を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    crumbles: [{ x0: 301, x1: 364, y0: 370, y1: 430, delay: 0.6 }, { x0: 454, x1: 517, y0: 370, y1: 430, delay: 0.6 }, { x0: 607, x1: 670, y0: 370, y1: 430, delay: 0.6 }],
+    area: [{ x0: 201, y0: 330, x1: 311, y1: 390 }, { x0: 354, y0: 330, x1: 464, y1: 390 }, { x0: 507, y0: 330, x1: 617, y1: 390 }, { x0: 660, y0: 330, x1: 780, y1: 390 }],
+    stars: [{ x: 673, y: 344 }],
+    height: x => spans(x, [[211,760,PIT]], 370) },
+  { name: '56 ジャングルと火山のジャンプ台 2', hint: '自走。ジャンプ台で跳び、着地の足場を作ろう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 845 },
+    zones: [{ type: 'bounce', x0: 293, x1: 333, y0: 371, y1: 391, v: 650 }],
+    area: [{ x0: 513, y0: 319, x1: 814, y1: 409 }],
+    stars: [{ x: 441, y: 126 }],
+    height: x => spans(x, [[363,744,PIT]], 379) },
+  { name: '57 ジャングルと火山の炎', hint: '自走。炎の上を渡る橋を引こう。炎に長く触れると燃える 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 739 },
+    zones: [{ type: 'fire', x0: 311, x1: 567, y0: 294, y1: 364 }],
+    stars: [{ x: 314, y: 192 }],
+    height: () => 354 },
+  { name: '58 ジャングルと火山の溶岩 2', hint: '自走。溶岩に触れたら失敗。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 743 },
+    zones: [{ type: 'lava', x0: 339, x1: 559, y0: 313, y1: 398 }],
+    stars: [{ x: 340, y: 221 }],
+    height: () => 358 },
+  { name: '59 ジャングルと火山の島', hint: '自走。島と島を道でつなごう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 748 },
+    stars: [{ x: 394, y: 264 }],
+    height: x => spans(x, [[194,381,PIT],[381,506,290],[506,618,PIT]], 379) },
+  { name: '60 ジャングルと火山のトランポリン 2', hint: '自走。ジャンプ台(トランポリン)で島から島へ跳ぶ。最初の隙間に道を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    zones: [{ type: 'bounce', x0: 311, x1: 365, y0: 349, y1: 369, v: 540 }, { type: 'bounce', x0: 513, x1: 567, y0: 349, y1: 369, v: 540 }, { type: 'bounce', x0: 715, x1: 769, y0: 349, y1: 369, v: 540 }],
+    area: [{ x0: 173, y0: 307, x1: 323, y1: 377 }],
+    stars: [{ x: 436, y: 173 }],
+    height: x => spans(x, [[213,303,PIT],[373,505,PIT],[575,707,PIT],[777,939,PIT]], 357) },
+  { name: '61 工場のベルト', hint: '重力。ベルトが運んでくれる。間の穴に橋を 星を取ろう', mode: 'gravity', tool: 'road', start: { x: 50 }, goal: { x: 850 },
+    zones: [{ type: 'belt', x0: 20, x1: 298, y0: 300, y1: 420, bs: 220 }, { type: 'belt', x0: 486, x1: 726, y0: 300, y1: 420, bs: 220 }],
+    stars: [{ x: 278, y: 355 }],
+    height: x => spans(x, [[298,486,PIT]], 380) },
+  { name: '62 工場の扉', hint: '自走。高台のスイッチを踏むと扉が開く。高台に登って降りる橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    switches: [{ x0: 302, y0: 261, x1: 357, y1: 273, door: 0 }],
+    doors: [{ x0: 575, x1: 603, y0: -20, y1: 367 }],
+    stars: [{ x: 190, y: 236 }],
+    height: x => spans(x, [[290,369,273]], 367) },
+  { name: '63 工場の壁', hint: '自走。地面を掘って、往復する壁の下をくぐろう 星を取ろう', mode: 'drive', tool: 'carve', start: { x: 40 }, goal: { x: 850 },
+    area: [{ x0: 186, y0: 342, x1: 754, y1: 432 }],
+    movers: [{ x: 435, y: 263, w: 70, h: 89, ax: 159, ay: 0, per: 5, ph: 0 }],
+    stars: [{ x: 209, y: 332 }],
+    height: () => 352 },
+  { name: '64 工場の吸い込み', hint: '自走。吸い込みの中心に近づくと失敗。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 716 },
+    zones: [{ type: 'pull', x0: 262, x1: 602, y0: 204, y1: 544, cx: 432, cy: 374, rad: 170, k: 1100, core: 40 }],
+    stars: [{ x: 282, y: 197 }],
+    height: () => 374 },
+  { name: '65 工場の扉 2', hint: '自走。高台のスイッチを踏むと扉が開く。高台に登って降りる橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    switches: [{ x0: 316, y0: 251, x1: 379, y1: 263, door: 0 }],
+    doors: [{ x0: 602, x1: 630, y0: -20, y1: 361 }],
+    stars: [{ x: 216, y: 225 }],
+    height: x => spans(x, [[304,391,263]], 361) },
+  { name: '66 工場のベルト 2', hint: '重力。ベルトが運んでくれる。間の穴に橋を 星を取ろう', mode: 'gravity', tool: 'road', start: { x: 50 }, goal: { x: 850 },
+    zones: [{ type: 'belt', x0: 20, x1: 313, y0: 300, y1: 420, bs: 250 }, { type: 'belt', x0: 504, x1: 744, y0: 300, y1: 420, bs: 250 }],
+    stars: [{ x: 282, y: 353 }],
+    height: x => spans(x, [[313,504,PIT]], 380) },
+  { name: '67 工場の土管', hint: '自走。溝と土管を越える橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 850 },
+    pipes: [{ x0: 289, x1: 327, y0: 240, y1: 600 }, { x0: 528, x1: 566, y0: 248, y1: 600 }],
+    stars: [{ x: 184, y: 182 }],
+    height: x => spans(x, [[217,282,PIT],[442,507,PIT]], 336) },
+  { name: '68 工場の壁 2', hint: '自走。地面を掘って、往復する壁の下をくぐろう 星を取ろう', mode: 'drive', tool: 'carve', start: { x: 40 }, goal: { x: 850 },
+    area: [{ x0: 232, y0: 341, x1: 794, y1: 431 }],
+    movers: [{ x: 478, y: 252, w: 70, h: 99, ax: 156, ay: 0, per: 5, ph: 0 }],
+    stars: [{ x: 229, y: 331 }],
+    height: () => 351 },
+  { name: '69 工場の扉 3', hint: '自走。高台のスイッチを踏むと扉が開く。高台に登って降りる橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    switches: [{ x0: 277, y0: 268, x1: 329, y1: 280, door: 0 }],
+    doors: [{ x0: 527, x1: 555, y0: -20, y1: 375 }],
+    stars: [{ x: 169, y: 242 }],
+    height: x => spans(x, [[265,341,280]], 375) },
+  { name: '70 工場の土管 2', hint: '自走。溝と土管を越える橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 850 },
+    pipes: [{ x0: 306, x1: 344, y0: 248, y1: 600 }, { x0: 522, x1: 560, y0: 256, y1: 600 }],
+    stars: [{ x: 192, y: 190 }],
+    height: x => spans(x, [[222,287,PIT],[438,503,PIT]], 350) },
+  { name: '71 街の歩行者', hint: '自走。歩行者が行き来する。押し合いになる。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    mobs: [{ kind: 'person', x: 381, y: 331, r: 18, mass: 0.8, spd: 90, x0: 321, x1: 619, dir: 1 }, { kind: 'person', x: 501, y: 331, r: 18, mass: 0.8, spd: 90, x0: 321, x1: 619, dir: -1 }],
+    stars: [{ x: 214, y: 240 }],
+    height: () => 351 },
+  { name: '72 街の対向車', hint: '自走。対向車が行き来する。押し合いになる。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    mobs: [{ kind: 'car', x: 379, y: 348, r: 26, mass: 2.5, spd: 150, x0: 319, x1: 612, dir: 1 }],
+    stars: [{ x: 207, y: 248 }],
+    height: () => 376 },
+  { name: '73 街の扉', hint: '自走。高台のスイッチを踏むと扉が開く。高台に登って降りる橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    switches: [{ x0: 275, y0: 243, x1: 327, y1: 255, door: 0 }],
+    doors: [{ x0: 537, x1: 565, y0: -20, y1: 367 }],
+    stars: [{ x: 179, y: 220 }],
+    height: x => spans(x, [[263,339,255]], 367) },
+  { name: '74 街の歩行者 2', hint: '自走。歩行者が行き来する。押し合いになる。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    mobs: [{ kind: 'person', x: 382, y: 340, r: 18, mass: 0.8, spd: 90, x0: 322, x1: 600, dir: 1 }, { kind: 'person', x: 502, y: 340, r: 18, mass: 0.8, spd: 90, x0: 322, x1: 600, dir: -1 }],
+    stars: [{ x: 214, y: 249 }],
+    height: () => 360 },
+  { name: '75 街の土管', hint: '自走。溝と土管を越える橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 850 },
+    pipes: [{ x0: 313, x1: 351, y0: 268, y1: 600 }, { x0: 545, x1: 583, y0: 276, y1: 600 }],
+    stars: [{ x: 205, y: 207 }],
+    height: x => spans(x, [[229,294,PIT],[466,531,PIT]], 349) },
+  { name: '76 街の対向車 2', hint: '自走。対向車が行き来する。押し合いになる。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    mobs: [{ kind: 'car', x: 377, y: 350, r: 26, mass: 2.5, spd: 150, x0: 317, x1: 624, dir: 1 }],
+    stars: [{ x: 205, y: 250 }],
+    height: () => 378 },
+  { name: '77 街の落石', hint: '自走。転がってくる大岩に当たるな 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 534 },
+    rocks: [{ x: 677, y: 156, r: 36, at: 0.2 }],
+    stars: [{ x: 232, y: 216 }],
+    height: x => x < 605 ? 382 : x < 705 ? 382 - 196 * smooth((x - 605) / 100) : 186 },
+  { name: '78 街の扉 2', hint: '自走。高台のスイッチを踏むと扉が開く。高台に登って降りる橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    switches: [{ x0: 293, y0: 263, x1: 346, y1: 275, door: 0 }],
+    doors: [{ x0: 580, x1: 608, y0: -20, y1: 366 }],
+    stars: [{ x: 183, y: 237 }],
+    height: x => spans(x, [[281,358,275]], 366) },
+  { name: '79 街の怪獣', hint: '自走。怪獣が行き来する。押し合いになる。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    mobs: [{ kind: 'monster', x: 372, y: 324, r: 42, mass: 6, spd: 70, x0: 312, x1: 620, dir: 1 }],
+    stars: [{ x: 203, y: 207 }],
+    height: () => 368 },
+  { name: '80 街の怪獣 2', hint: '自走。怪獣が行き来する。押し合いになる。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    mobs: [{ kind: 'monster', x: 388, y: 318, r: 42, mass: 6, spd: 70, x0: 328, x1: 614, dir: 1 }],
+    stars: [{ x: 209, y: 202 }],
+    height: () => 362 },
+  { name: '81 地下の壁', hint: '自走。地面を掘って、往復する壁の下をくぐろう 星を取ろう', mode: 'drive', tool: 'carve', start: { x: 40 }, goal: { x: 850 },
+    area: [{ x0: 235, y0: 351, x1: 797, y1: 441 }],
+    movers: [{ x: 481, y: 262, w: 70, h: 99, ax: 156, ay: 0, per: 5, ph: 0 }],
+    stars: [{ x: 209, y: 341 }],
+    height: () => 361 },
+  { name: '82 地下の山', hint: '自走。鉄は削れない。坂を作って登ろう 星を取ろう', mode: 'drive', tool: 'carve', start: { x: 50 }, goal: { x: 756 },
+    iron: [{ x0: 436, x1: 496, y0: 260, y1: 420 }],
+    stars: [{ x: 451, y: 240 }],
+    height: x => mt(x, 466, 180, 60) },
+  { name: '83 地下の扉', hint: '自走。高台のスイッチを踏むと扉が開く。高台に登って降りる橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    switches: [{ x0: 288, y0: 237, x1: 353, y1: 249, door: 0 }],
+    doors: [{ x0: 550, x1: 578, y0: -20, y1: 369 }],
+    stars: [{ x: 182, y: 214 }],
+    height: x => spans(x, [[276,365,249]], 369) },
+  { name: '84 地下の溶岩', hint: '自走。溶岩に触れたら失敗。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 725 },
+    zones: [{ type: 'lava', x0: 300, x1: 590, y0: 308, y1: 393 }],
+    stars: [{ x: 300, y: 216 }],
+    height: () => 353 },
+  { name: '85 地下の山 2', hint: '自走。鉄は削れない。坂を作って登ろう 星を取ろう', mode: 'drive', tool: 'carve', start: { x: 50 }, goal: { x: 755 },
+    iron: [{ x0: 435, x1: 495, y0: 260, y1: 420 }],
+    stars: [{ x: 434, y: 240 }],
+    height: x => mt(x, 465, 180, 60) },
+  { name: '86 地下の割れる床', hint: '自走。割れる床は乗って少しすると落ちる。床と床の間に道を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    crumbles: [{ x0: 309, x1: 376, y0: 374, y1: 434, delay: 0.6 }, { x0: 476, x1: 543, y0: 374, y1: 434, delay: 0.6 }, { x0: 643, x1: 710, y0: 374, y1: 434, delay: 0.6 }],
+    area: [{ x0: 199, y0: 334, x1: 319, y1: 394 }, { x0: 366, y0: 334, x1: 486, y1: 394 }, { x0: 533, y0: 334, x1: 653, y1: 394 }, { x0: 700, y0: 334, x1: 830, y1: 394 }],
+    stars: [{ x: 376, y: 348 }],
+    height: x => spans(x, [[209,810,PIT]], 374) },
+  { name: '87 地下の壁 2', hint: '自走。地面を掘って、往復する壁の下をくぐろう 星を取ろう', mode: 'drive', tool: 'carve', start: { x: 40 }, goal: { x: 850 },
+    area: [{ x0: 237, y0: 356, x1: 803, y1: 446 }],
+    movers: [{ x: 485, y: 275, w: 70, h: 91, ax: 158, ay: 0, per: 4, ph: 0 }],
+    stars: [{ x: 229, y: 346 }],
+    height: () => 366 },
+  { name: '88 地下の吸い込み', hint: '自走。吸い込みの中心に近づくと失敗。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 808 },
+    zones: [{ type: 'pull', x0: 314, x1: 654, y0: 200, y1: 540, cx: 484, cy: 370, rad: 170, k: 1100, core: 40 }],
+    stars: [{ x: 326, y: 193 }],
+    height: () => 370 },
+  { name: '89 地下の山 3', hint: '自走。鉄は削れない。坂を作って登ろう 星を取ろう', mode: 'drive', tool: 'carve', start: { x: 50 }, goal: { x: 720 },
+    iron: [{ x0: 400, x1: 460, y0: 250, y1: 420 }],
+    stars: [{ x: 410, y: 230 }],
+    height: x => mt(x, 430, 180, 60) },
+  { name: '90 地下の扉 2', hint: '自走。高台のスイッチを踏むと扉が開く。高台に登って降りる橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    switches: [{ x0: 296, y0: 247, x1: 353, y1: 259, door: 0 }],
+    doors: [{ x0: 572, x1: 600, y0: -20, y1: 365 }],
+    stars: [{ x: 184, y: 221 }],
+    height: x => spans(x, [[284,365,259]], 365) },
+  { name: '91 空と宇宙のマーク', hint: '自走。空中のマークを通ると再び跳ぶ。マークに向かう坂を作ろう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 767 },
+    marks: [{ x: 389, y: 315, v: 700 }],
+    area: [{ x0: 123, y0: 231, x1: 333, y1: 381 }],
+    stars: [{ x: 492, y: 29 }],
+    height: x => spans(x, [[313,620,PIT]], 371) },
+  { name: '92 空と宇宙の風船', hint: 'ジャンプ車。低重力ゾーンでは長く浮かぶ。着地の足場をつくろう 星を取ろう', mode: 'jump', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    zones: [{ type: 'gravity', x0: 190, x1: 881, y0: -200, y1: 420, g: 0.4 }],
+    area: [{ x0: 520, y0: 290, x1: 900, y1: 380 }],
+    stars: [{ x: 359, y: 160 }],
+    height: x => spans(x, [[200,871,PIT]], 360) },
+  { name: '93 空と宇宙のワープ', hint: '自走。紫のワープ入口に入ると青の出口に出る。入口へ向かう坂を作ろう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    warps: [{ a: { x: 274, y: 282 }, b: { x: 875, y: 334 } }],
+    area: [{ x0: 84, y0: 242, x1: 314, y1: 386 }],
+    stars: [{ x: 208, y: 315 }],
+    height: x => spans(x, [[286,806,PIT]], 376) },
+  { name: '94 空と宇宙のジャンプ台', hint: '自走。ジャンプ台で跳び、着地の足場を作ろう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 873 },
+    zones: [{ type: 'bounce', x0: 276, x1: 316, y0: 373, y1: 393, v: 650 }],
+    area: [{ x0: 496, y0: 321, x1: 798, y1: 411 }],
+    stars: [{ x: 421, y: 128 }],
+    height: x => spans(x, [[346,728,PIT]], 381) },
+  { name: '95 空と宇宙の風車', hint: '自走。穴に橋を架け、風車の上昇気流で高台に登ろう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 800 },
+    area: [{ x0: 124, y0: 327, x1: 318, y1: 397 }],
+    zones: [{ type: 'fan', x0: 293, x1: 454, y0: 170, y1: 417, fy: -1700 }],
+    stars: [{ x: 557, y: 6 }],
+    height: x => (x >= 204 && x < 278) ? PIT : (x < 454 ? 377 : 217) },
+  { name: '96 空と宇宙のワープ 2', hint: '自走。紫のワープ入口に入ると青の出口に出る。入口へ向かう坂を作ろう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    warps: [{ a: { x: 299, y: 308 }, b: { x: 861, y: 346 } }],
+    area: [{ x0: 109, y0: 268, x1: 339, y1: 395 }],
+    stars: [{ x: 223, y: 341 }],
+    height: x => spans(x, [[321,793,PIT]], 385) },
+  { name: '97 空と宇宙の風船 2', hint: 'ジャンプ車。低重力ゾーンでは長く浮かぶ。着地の足場をつくろう 星を取ろう', mode: 'jump', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    zones: [{ type: 'gravity', x0: 188, x1: 897, y0: -200, y1: 434, g: 0.4 }],
+    area: [{ x0: 518, y0: 304, x1: 898, y1: 394 }],
+    stars: [{ x: 359, y: 170 }],
+    height: x => spans(x, [[198,887,PIT]], 374) },
+  { name: '98 空と宇宙のマーク 2', hint: '自走。空中のマークを通ると再び跳ぶ。マークに向かう坂を作ろう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 750 },
+    marks: [{ x: 375, y: 326, v: 700 }],
+    area: [{ x0: 122, y0: 243, x1: 332, y1: 393 }],
+    stars: [{ x: 492, y: 32 }],
+    height: x => spans(x, [[312,613,PIT]], 383) },
+  { name: '99 空と宇宙のジェットコースター', hint: '重力。ジェットコースター! 頂上のスイッチを押すと扉が開く。丘を描いてスイッチを通ろう 星を取ろう', mode: 'gravity', tool: 'road', start: { x: 50 }, goal: { x: 764 },
+    switches: [{ x0: 341, y0: 178, x1: 385, y1: 192, door: 0 }],
+    doors: [{ x0: 682, x1: 710, y0: -20, y1: 360 }],
+    stars: [{ x: 125, y: 121 }],
+    height: x => x < 175 ? 122 + 30 * (x / 175) : (x < 612 ? PIT : 360) },
+  { name: '100 空と宇宙の滑り台', hint: '重力。落下の勢いで届く滑り台を引こう 星を取ろう', mode: 'gravity', tool: 'road', start: { x: 50 }, goal: { x: 820 },
+    stars: [{ x: 113, y: 124 }],
+    height: x => x < 166 ? 127 + 30 * (x / 166) : (x < 485 ? PIT : 330) },
+  { name: '101 遊園地のジェットコースター', hint: '重力。ジェットコースター! 頂上のスイッチを押すと扉が開く。丘を描いてスイッチを通ろう 星を取ろう', mode: 'gravity', tool: 'road', start: { x: 50 }, goal: { x: 776 },
+    switches: [{ x0: 383, y0: 177, x1: 427, y1: 191, door: 0 }],
+    doors: [{ x0: 694, x1: 722, y0: -20, y1: 383 }],
+    stars: [{ x: 128, y: 125 }],
+    height: x => x < 159 ? 122 + 30 * (x / 159) : (x < 624 ? PIT : 383) },
+  { name: '102 遊園地のトランポリン', hint: '自走。ジャンプ台(トランポリン)で島から島へ跳ぶ。最初の隙間に道を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    zones: [{ type: 'bounce', x0: 312, x1: 366, y0: 361, y1: 381, v: 540 }, { type: 'bounce', x0: 515, x1: 569, y0: 361, y1: 381, v: 540 }, { type: 'bounce', x0: 718, x1: 772, y0: 361, y1: 381, v: 540 }],
+    area: [{ x0: 174, y0: 319, x1: 324, y1: 389 }],
+    stars: [{ x: 435, y: 185 }],
+    height: x => spans(x, [[214,304,PIT],[374,507,PIT],[577,710,PIT],[780,943,PIT]], 369) },
+  { name: '103 遊園地の対向車', hint: '自走。対向車が行き来する。押し合いになる。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    mobs: [{ kind: 'car', x: 398, y: 330, r: 26, mass: 2.5, spd: 150, x0: 338, x1: 610, dir: 1 }],
+    stars: [{ x: 223, y: 231 }],
+    height: () => 358 },
+  { name: '104 遊園地の風船', hint: 'ジャンプ車。低重力ゾーンでは長く浮かぶ。着地の足場をつくろう 星を取ろう', mode: 'jump', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    zones: [{ type: 'gravity', x0: 189, x1: 875, y0: -200, y1: 444, g: 0.4 }],
+    area: [{ x0: 519, y0: 314, x1: 899, y1: 404 }],
+    stars: [{ x: 359, y: 182 }],
+    height: x => spans(x, [[199,865,PIT]], 384) },
+  { name: '105 遊園地の扉', hint: '自走。高台のスイッチを踏むと扉が開く。高台に登って降りる橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    switches: [{ x0: 324, y0: 252, x1: 372, y1: 264, door: 0 }],
+    doors: [{ x0: 578, x1: 606, y0: -20, y1: 365 }],
+    stars: [{ x: 220, y: 226 }],
+    height: x => spans(x, [[312,384,264]], 365) },
+  { name: '106 遊園地のジェットコースター 2', hint: '重力。ジェットコースター! 頂上のスイッチを押すと扉が開く。丘を描いてスイッチを通ろう 星を取ろう', mode: 'gravity', tool: 'road', start: { x: 50 }, goal: { x: 828 },
+    switches: [{ x0: 392, y0: 203, x1: 436, y1: 217, door: 0 }],
+    doors: [{ x0: 698, x1: 726, y0: -20, y1: 365 }],
+    stars: [{ x: 129, y: 112 }],
+    height: x => x < 153 ? 108 + 30 * (x / 153) : (x < 628 ? PIT : 365) },
+  { name: '107 遊園地のトランポリン 2', hint: '自走。ジャンプ台(トランポリン)で島から島へ跳ぶ。最初の隙間に道を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    zones: [{ type: 'bounce', x0: 325, x1: 379, y0: 348, y1: 368, v: 560 }, { type: 'bounce', x0: 519, x1: 573, y0: 348, y1: 368, v: 560 }, { type: 'bounce', x0: 713, x1: 767, y0: 348, y1: 368, v: 560 }],
+    area: [{ x0: 187, y0: 306, x1: 337, y1: 376 }],
+    stars: [{ x: 677, y: 156 }],
+    height: x => spans(x, [[227,317,PIT],[387,511,PIT],[581,705,PIT],[775,929,PIT]], 356) },
+  { name: '108 遊園地の対向車 2', hint: '自走。対向車が行き来する。押し合いになる。上を渡る橋を引こう 星を取ろう', mode: 'drive', tool: 'road', start: { x: 40 }, goal: { x: 850 },
+    mobs: [{ kind: 'car', x: 362, y: 332, r: 26, mass: 2.5, spd: 150, x0: 302, x1: 593, dir: 1 }],
+    stars: [{ x: 186, y: 232 }],
+    height: () => 360 },
+  { name: '109 遊園地の風船 2', hint: 'ジャンプ車。低重力ゾーンでは長く浮かぶ。着地の足場をつくろう 星を取ろう', mode: 'jump', tool: 'road', start: { x: 50 }, goal: { x: 880 },
+    zones: [{ type: 'gravity', x0: 182, x1: 879, y0: -200, y1: 437, g: 0.4 }],
+    area: [{ x0: 512, y0: 307, x1: 892, y1: 397 }],
+    stars: [{ x: 359, y: 177 }],
+    height: x => spans(x, [[192,869,PIT]], 377) },
+  { name: '110 遊園地のジェットコースター 3', hint: '重力。ジェットコースター! 頂上のスイッチを押すと扉が開く。丘を描いてスイッチを通ろう 星を取ろう', mode: 'gravity', tool: 'road', start: { x: 50 }, goal: { x: 836 },
+    switches: [{ x0: 420, y0: 179, x1: 464, y1: 193, door: 0 }],
+    doors: [{ x0: 726, x1: 754, y0: -20, y1: 365 }],
+    stars: [{ x: 142, y: 129 }],
+    height: x => x < 169 ? 125 + 30 * (x / 169) : (x < 656 ? PIT : 365) },
+  // <<GENERATED-END>>
+];
+
+
+const THEMES = [
+  { sky: '#9fd8ff', ground: '#7a5a3a', edge: '#4caf50', shift: 0 },   // 1-2 草原
+  { sky: '#9fd8ff', ground: '#7a5a3a', edge: '#4caf50', shift: 0 },
+  { sky: '#ffe3a3', ground: '#d4a057', edge: '#f2c777', shift: 2 },   // 3 砂漠
+  { sky: '#e3f3ff', ground: '#c9d6e4', edge: '#ffffff', shift: -2 },  // 4 雪山
+  { sky: '#8fe0ff', ground: '#c8b27a', edge: '#e8d79e', shift: -3 },  // 5 海
+  { sky: '#a9dfa0', ground: '#6b4a2a', edge: '#2f9e44', shift: 4 },   // 6 ジャングルと火山
+  { sky: '#cdd3d8', ground: '#575d66', edge: '#e2a43a', shift: 3 },   // 7 工場
+  { sky: '#c3d3e6', ground: '#6b6f76', edge: '#a0a6af', shift: 5 },   // 8 街
+  { sky: '#2b2233', ground: '#5c4a3a', edge: '#917a60', shift: 1 },   // 9 地下
+  { sky: '#1f3f8f', ground: '#8fb6e8', edge: '#ffffff', shift: 6 },   // 10 空と宇宙
+  { sky: '#ffd9ee', ground: '#ff8fb8', edge: '#ffffff', shift: 7 },   // 11 遊園地
+];
+const WORLD_NAMES = ['草原', 'ギミック', '砂漠', '雪山', '海', 'ジャングルと火山', '工場', '街', '地下', '空と宇宙', '遊園地'];
+const theme = () => THEMES[Math.min(THEMES.length - 1, Math.floor(stage / 10))];
+let stageSpoken = false, broken = [], speed = 1, tool = 'road', stage = 0, hts, roads, car, state, t0, stuckT, lastX, angle, strokes;
+
+function loadStage(i) {
+  stage = i;
+  const s = STAGES[i];
+  hts = new Float32Array(N);
+  for (let k = 0; k < N; k++) hts[k] = s.height(k * COL);
+  roads = []; strokes = [];
+  resetCar();
+  tool = STAGES[i].tool === 'both' ? 'road' : STAGES[i].tool;
+  cv.style.background = theme().sky;
+  if (stageSpoken) speak(stageSpeech());
+  curWorld = Math.floor(i / 10); renderStageButtons();
+  $('tool').style.display = STAGES[i].tool === 'both' ? '' : 'none';
+  updToolBtn();
+}
+function groundY(x) {
+  const f = Math.max(0, Math.min(N - 1.001, x / COL)), k = f | 0, u = f - k;
+  return hts[k] * (1 - u) + hts[k + 1] * u;
+}
+function resetCar() {
+  engineStop();
+  const s = STAGES[stage];
+  LD = loadout(); R = LD.r;
+  car = { x: s.start.x, y: groundY(s.start.x) - R - 1, vx: 0, vy: 0, r: R, cd: 0, contact: false, nx: 0, ny: -1 };
+  broken = (s.breaks || []).map(() => false);
+  rocks = []; rockQ = (s.rocks || (s.boulder ? [s.boulder] : [])).map(q => ({ ...q, done: false }));
+  opened = (s.doors || []).map(() => false);
+  mobs = (s.mobs || []).map(m => ({ x: m.x, y: m.y, r: m.r || 18, vx: 0, vy: 0, mass: m.mass || 1.2, dir: m.dir || 1, spd: m.spd || 80,
+    x0: m.x0 === undefined ? -1e9 : m.x0, x1: m.x1 === undefined ? 1e9 : m.x1, kind: m.kind || 'person', contact: false, nx: 0, ny: -1 }));
+  marks = (s.marks || []).map(m => ({ ...m, hit: false }));
+  heat = 0; warpCd = 0; bounceCd = 0;
+  crumT = (s.crumbles || []).map(() => null); fallen = (s.crumbles || []).map(() => false);
+  stars = (s.stars || []).map(t => ({ x: t.x, y: t.y, got: false })); starsGot = 0;
+  pads = (s.pads || []).map(p => ({ px: p.x, py: p.y !== undefined ? p.y : groundY(p.x) - 18, hit: false }));
+  angle = 0; state = 'draw'; stuckT = 0; lastX = car.x; t0 = 0;
+  $('go').textContent = 'スタート';
+  setInfo(toolMsg());
+}
+$('spd').onclick = () => { speed = speed === 1 ? 2 : speed === 2 ? 4 : speed === 4 ? 10 : 1; $('spd').textContent = '速度 ×' + speed; };
+function updToolBtn() { $('tool').textContent = '道具: ' + (tool === 'road' ? '道' : '削り'); }
+$('tool').onclick = () => { tool = tool === 'road' ? 'carve' : 'road'; updToolBtn(); setInfo(toolMsg()); };
+// ステージ説明の読み上げ(♪ONのとき。ブラウザ内蔵の音声合成を使用)
+function speak(text) {
+  try {
+    if (typeof speechSynthesis === 'undefined') return;
+    speechSynthesis.cancel();
+    if (!bgmOn || !text) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'ja-JP'; u.rate = 1.05; u.volume = 1;
+    const v = speechSynthesis.getVoices().find(v => v.lang && v.lang.toLowerCase().startsWith('ja'));
+    if (v) u.voice = v;
+    speechSynthesis.speak(u);
+  } catch (e) {}
+}
+function stageSpeech() { const s = STAGES[stage]; return 'ステージ' + s.name.replace(/^(\d+) /, '$1、') + '。' + s.hint; }
+function toolMsg() { const s = STAGES[stage]; return 'ステージ' + s.name + ' ― ' + s.hint; }
+// ワールド(10個)とステージ(10個)の2段のボタン
+let curWorld = 0;
+function renderStageButtons() {
+  const wb = $('worlds'); wb.innerHTML = '';
+  WORLD_NAMES.forEach((n, w) => {
+    if (w * 10 >= STAGES.length) return;
+    const b = document.createElement('button'); b.className = 'sub' + (w === curWorld ? ' on' : ''); b.textContent = n;
+    b.onclick = () => { audioInit(); stageSpoken = true; loadStage(w * 10); }; wb.appendChild(b);
+  });
+  const sb = $('stages'); sb.innerHTML = '';
+  for (let k = 0; k < 10; k++) {
+    const i = curWorld * 10 + k; if (i >= STAGES.length) break;
+    const b = document.createElement('button'); b.className = 'sub' + (i === stage ? ' on' : ''); b.textContent = i + 1;
+    b.onclick = () => { audioInit(); stageSpoken = true; loadStage(i); }; sb.appendChild(b);
+  }
+}
+function setInfo(t) { $('info').textContent = t; }
+// 車とタイヤの選択
+(function () {
+  const fill = (el, list, cur) => { list.forEach((o, i) => { const op = document.createElement('option'); op.value = i; op.textContent = o.name; el.appendChild(op); }); el.value = cur; };
+  fill($('carSel'), CARS, carSel); fill($('tireSel'), TIRES, tireSel);
+  const dots = n => '●'.repeat(n) + '○'.repeat(5 - n);
+  const upd = () => { const c = CARS[carSel], t = TIRES[tireSel]; $('lo-stats').innerHTML = `速さ ${dots(c.st[0])}　加速 ${dots(c.st[1])}　重さ ${dots(c.st[2])}　ジャンプ ${dots(c.st[3])}<br>${c.desc}<br>タイヤ: ${t.desc}`; };
+  const apply = () => { upd(); carSel = +$('carSel').value; tireSel = +$('tireSel').value; try { localStorage.setItem('lr_car', carSel); localStorage.setItem('lr_tire', tireSel); } catch (e) {} engineStop(); resetCar(); };
+  $('carSel').onchange = apply; $('tireSel').onchange = apply; upd();
+})();
+
+
+// ---- 効果音 (WebAudio) ----
+let AC = null, master = null, eng = null, engGain = null, lastDrawSfx = 0;
+function audioInit() {
+  if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
+  try {
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    master = AC.createGain(); master.gain.value = 0.4; master.connect(AC.destination);
+  } catch (e) { AC = null; }
+  if (AC && bgmOn) bgmStart();
+}
+function tone(f0, f1, dur, type = 'square', vol = 0.3, delay = 0) {
+  if (!AC) return;
+  const t = AC.currentTime + delay, o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(master); o.start(t); o.stop(t + dur + 0.02);
+}
+function noise(dur, vol = 0.25, freq = 1200) {
+  if (!AC) return;
+  const t = AC.currentTime, n = Math.floor(AC.sampleRate * dur), b = AC.createBuffer(1, n, AC.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+  const s = AC.createBufferSource(), f = AC.createBiquadFilter(), g = AC.createGain();
+  s.buffer = b; f.type = 'bandpass'; f.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  s.connect(f); f.connect(g); g.connect(master); s.start(t);
+}
+function sfxDraw(kind) {
+  if (!AC) return;
+  const now = performance.now();
+  if (now - lastDrawSfx < 70) return; lastDrawSfx = now;
+  if (kind === 'carve') noise(0.08, 0.18, 700 + Math.random() * 500);
+  else tone(520 + Math.random() * 80, 600, 0.06, 'triangle', 0.12);
+}
+function engineStart() {
+  if (!AC || eng) return;
+  eng = AC.createOscillator(); engGain = AC.createGain();
+  eng.type = ['sawtooth', 'sawtooth', 'square', 'triangle'][carSel]; eng.frequency.value = 60; engGain.gain.value = 0.0;
+  const f = AC.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 500;
+  eng.connect(f); f.connect(engGain); engGain.connect(master); eng.start();
+}
+function engineStop() {
+  if (!eng) return;
+  try { eng.stop(); } catch (e) {}
+  eng = null; engGain = null;
+}
+function engineUpdate() {
+  if (!eng) return;
+  const sp = Math.hypot(car.vx, car.vy), t = AC.currentTime;
+  eng.frequency.setTargetAtTime((55 + sp * 0.35) * [1, 1.5, 0.6, 1.25][carSel], t, 0.05);
+  engGain.gain.setTargetAtTime(car.contact ? 0.10 : 0.04, t, 0.05);
+}
+function sfxClear() { [523, 659, 784, 1046].forEach((f, i) => tone(f, f, 0.18, 'square', 0.22, i * 0.12)); }
+function sfxFail() { tone(400, 80, 0.6, 'sawtooth', 0.25); noise(0.25, 0.2, 300); }
+function sfxBoom() { noise(0.4, 0.5, 300); tone(120, 40, 0.4, 'sawtooth', 0.3); }
+function sfxJump() { tone(300, 700, 0.12, 'square', 0.12); }
+function sfxBoost() { tone(400, 1500, 0.25, 'sawtooth', 0.2); }
+function sfxStart() { tone(300, 600, 0.15, 'square', 0.2); }
+
+// ---- BGM: ノリのいいループ(WebAudioで合成) ----
+let bgmOn = true, bgmTimer = null, bgmStep = 0, bgmNext = 0;
+const BASS = [0, 0, 12, 0, 0, 0, 12, 7, -2, -2, 10, -2, -2, 0, 5, 7];       // 16分
+const ARP = [0, 4, 7, 12, 7, 4, 7, 12, 3, 7, 10, 15, 10, 7, 10, 14];
+const mtof = n => 55 * Math.pow(2, n / 12);
+function drum(kind, t) {
+  if (!AC) return;
+  if (kind === 'k') {
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+    g.gain.setValueAtTime(0.7, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+    o.connect(g); g.connect(bgmGain); o.start(t); o.stop(t + 0.2);
+  } else {
+    const n = Math.floor(AC.sampleRate * (kind === 's' ? 0.12 : 0.04)), b = AC.createBuffer(1, n, AC.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+    const src = AC.createBufferSource(), f = AC.createBiquadFilter(), g = AC.createGain();
+    src.buffer = b; f.type = 'highpass'; f.frequency.value = kind === 's' ? 1500 : 7000;
+    g.gain.setValueAtTime(kind === 's' ? 0.35 : 0.12, t); g.gain.exponentialRampToValueAtTime(0.001, t + (kind === 's' ? 0.12 : 0.04));
+    src.connect(f); f.connect(g); g.connect(bgmGain); src.start(t);
+  }
+}
+function note(freq, t, dur, type, vol) {
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(bgmGain); o.start(t); o.stop(t + dur + 0.02);
+}
+let bgmGain = null;
+function bgmSched() {
+  if (!AC || !bgmOn) return;
+  const bpm = state === 'run' ? 150 + Math.min(40, speed * 3) : 128, sixteenth = 60 / bpm / 4;
+  while (bgmNext < AC.currentTime + 0.25) {
+    const i = bgmStep % 16, t = bgmNext, bar = Math.floor(bgmStep / 16) % 4, tr = [0, 0, 5, 7][bar] + theme().shift;
+    if (i % 4 === 0) drum('k', t);
+    if (i % 8 === 4) drum('s', t);
+    if (i % 2 === 0) drum('h', t); else if (state === 'run') drum('h', t);
+    if (BASS[i] !== null) note(mtof(BASS[i] + tr - 12), t, sixteenth * 1.6, 'sawtooth', 0.16);
+    if (state === 'run' || i % 2 === 0) note(mtof(ARP[i] + tr + 12), t, sixteenth * 0.9, 'square', state === 'run' ? 0.07 : 0.04);
+    bgmNext += sixteenth; bgmStep++;
+  }
+}
+function bgmStart() {
+  if (!AC || bgmTimer) return;
+  bgmGain = AC.createGain(); bgmGain.gain.value = 0.35; bgmGain.connect(AC.destination);
+  bgmNext = AC.currentTime + 0.1; bgmStep = 0;
+  bgmTimer = setInterval(bgmSched, 60);
+}
+$('bgm').onclick = () => {
+  audioInit(); bgmOn = !bgmOn; if (!bgmOn) { try { speechSynthesis.cancel(); } catch (e) {} }
+  $('bgm').textContent = '♪ ' + (bgmOn ? 'ON' : 'OFF');
+  if (bgmOn) { if (AC) { bgmNext = AC.currentTime + 0.1; } bgmStart(); }
+};
+
+// ---- 描画入力 ----
+let drawing = false, prev = null, roadPts = null;
+function pos(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+}
+// 鉄は削れない: 鉄の上面より深くは削れない
+function ironLimit(x) {
+  let lim = Infinity;
+  for (const b of STAGES[stage].iron || []) if (x >= b.x0 && x <= b.x1) lim = Math.min(lim, b.y0);
+  return lim;
+}
+// 描画エリア: 指定があるステージでは、エリアの外には線を引けない
+function inArea(p) {
+  const ar = STAGES[stage].area;
+  // r.tool を指定したエリアは、その道具のときだけ有効
+  return !ar || ar.some(r => (!r.tool || r.tool === tool) && p.x >= r.x0 && p.x <= r.x1 && p.y >= r.y0 && p.y <= r.y1);
+}
+function addPoint(p) {
+  if (!inArea(p)) { roadPts = null; return; }
+  // p が地面の内側なら削る、空中なら道
+  if (tool === 'carve') {
+    if (!(p.y > groundY(p.x) + 0.5 && p.y < PIT)) return;
+    const k = Math.round(p.x / COL);
+    if (k >= 0 && k < N) { const ny = Math.min(p.y, ironLimit(k * COL)); if (hts[k] < ny) hts[k] = ny; }
+    sfxDraw('carve');
+  } else {
+    if (roadPts) roads.push({ ax: roadPts.x, ay: roadPts.y, bx: p.x, by: p.y });
+    roadPts = p; sfxDraw('road');
+  }
+}
+// 線の端は、近くの地面や道につく(指で描いても端がつながるように)
+const SNAP = 28;
+function snapPoint(p) {
+  let best = null, bd = SNAP;
+  const k0 = Math.max(0, Math.floor((p.x - SNAP) / COL)), k1 = Math.min(N - 1, Math.ceil((p.x + SNAP) / COL));
+  for (let k = k0; k <= k1; k++) {
+    if (hts[k] >= PIT - 1) continue;
+    const d = Math.hypot(k * COL - p.x, hts[k] - p.y);
+    if (d < bd) { bd = d; best = { x: k * COL, y: hts[k] }; }
+  }
+  for (const r of roads) for (const q of [{ x: r.ax, y: r.ay }, { x: r.bx, y: r.by }]) {
+    const d = Math.hypot(q.x - p.x, q.y - p.y);
+    if (d < bd) { bd = d; best = q; }
+  }
+  return best || p;
+}
+function strokeStart(p) { return tool === 'road' && inArea(snapPoint(p)) ? snapPoint(p) : p; }
+function strokeEnd() { // 指を離したとき: 最後の点を近くの地面・道に合わせる
+  if (tool === 'road' && roadPts) { const q = snapPoint(roadPts); if (q !== roadPts && inArea(q)) addPoint(q); }
+  drawing = false; prev = null; roadPts = null;
+}
+function strokeTo(p) {
+  if (!prev) { p = strokeStart(p); prev = p; addPoint(p); return; }
+  const dx = p.x - prev.x, dy = p.y - prev.y, d = Math.hypot(dx, dy);
+  const n = Math.max(1, Math.ceil(d / 3));
+  for (let i = 1; i <= n; i++) addPoint({ x: prev.x + dx * i / n, y: prev.y + dy * i / n });
+  prev = p;
+}
+cv.addEventListener('pointerdown', e => {
+  audioInit(); stageSpoken = true;
+  if (state !== 'draw') return;
+  cv.setPointerCapture(e.pointerId); drawing = true; prev = null; roadPts = null; strokeTo(pos(e));
+});
+cv.addEventListener('pointermove', e => { if (drawing) strokeTo(pos(e)); });
+const endDraw = () => strokeEnd();
+cv.addEventListener('pointerup', endDraw);
+cv.addEventListener('pointercancel', endDraw);
+
+$('reset').onclick = () => loadStage(stage);
+$('go').onclick = () => {
+  audioInit(); stageSpoken = true;
+  if (state === 'clear' && stage < STAGES.length - 1) { loadStage(stage + 1); return; }
+  if (state === 'draw') { try { speechSynthesis.cancel(); } catch (e) {} sfxStart(); engineStart(); state = 'run'; t0 = 0; $('go').textContent = '戻る'; setInfo('走行中…'); }
+  else { engineStop(); resetCar(); }
+};
+
+// ---- 物理 ----
+let crumT = [], fallen = [], stars = [], starsGot = 0, rocks = [], rockQ = [], marks = [], mobs = [], opened = [], heat = 0, warpCd = 0, bounceCd = 0, pads = [];
+const blocksOf = () => {
+  const st = STAGES[stage];
+  return (st.iron || []).concat(st.pipes || [], (st.breaks || []).filter((b, i) => !broken[i]), (st.doors || []).filter((d, i) => !opened[i]), (st.crumbles || []).filter((c, i) => !fallen[i]));
+};
+function checkBreaks(b) { // 速度が足りれば爆発する岩を壊して通り抜ける
+  (STAGES[stage].breaks || []).forEach((k, i) => {
+    if (broken[i]) return;
+    const cx = Math.max(k.x0, Math.min(k.x1, b.x)), cy = Math.max(k.y0, Math.min(k.y1, b.y));
+    const ok = k.hot ? (b === car && heat > 0.2) : Math.hypot(b.vx, b.vy) >= k.need; // 熱い車なら氷の壁が溶ける
+    if (Math.hypot(b.x - cx, b.y - cy) < b.r + 4 && ok) {
+      broken[i] = true; if (!k.hot) { b.vx *= 0.75; b.vy *= 0.75; } sfxBoom();
+    }
+  });
+}
+// 重力の倍率: 低重力ゾーン(type:'gravity', g)や水中(type:'water', g=0.3)
+function gfac(b) {
+  for (const z of STAGES[stage].zones || []) {
+    if ((z.type === 'gravity' || z.type === 'water') && b.x >= z.x0 && b.x <= z.x1 && b.y >= z.y0 && b.y <= z.y1) return z.g !== undefined ? z.g : 0.3;
+  }
+  return 1;
+}
+const zoneOn = z => !z.per || (t0 % z.per) < z.per * (z.duty || 0.5);
+function applyZones(b, dt, isCar) {
+  for (const z of STAGES[stage].zones || []) {
+    if (b.x < z.x0 || b.x > z.x1 || b.y < z.y0 || b.y > z.y1 || !zoneOn(z)) continue;
+    if (z.type === 'pull') { // 吸い込み(蟻地獄・渦潮・磁石): 中心へ引く(k<0 なら押し返す)
+      const dx = z.cx - b.x, dy = z.cy - b.y, d = Math.hypot(dx, dy);
+      if (d < z.rad && d > 1) { const k = z.k * (1 - d / z.rad); b.vx += dx / d * k * dt; b.vy += dy / d * k * dt; }
+    }
+    else if (z.type === 'ice') { if (isCar && !LD.ice) b.sand = true; }
+    else if (z.type === 'water') { if (isCar) b.sand = true; const f = Math.pow(0.05, dt); b.vx *= f; b.vy *= Math.pow(0.3, dt); }
+    else if (z.type === 'wind' || z.type === 'fan') { const inv = isCar ? 1 / LD.mass : 1; b.vx += (z.fx || 0) * dt * inv; b.vy += (z.fy || 0) * dt * inv; }
+    else if (z.type === 'sand') { if (isCar) b.sand = true; const f = Math.pow(0.02, dt); b.vx *= f; b.vy *= Math.pow(0.3, dt); }
+    else if (z.type === 'belt' && b.contact) {
+      let tx = -b.ny, ty = b.nx; if (tx < 0) { tx = -tx; ty = -ty; }
+      const vt = b.vx * tx + b.vy * ty, a = 900 * dt;
+      const dv = z.bs > 0 ? (vt < z.bs ? Math.min(a, z.bs - vt) : 0) : (vt > z.bs ? -Math.min(a, vt - z.bs) : 0);
+      b.vx += tx * dv; b.vy += ty * dv;
+    }
+  }
+}
+function moverNow(m, t) {
+  const w = 2 * Math.PI / m.per, ph = t * w + (m.ph || 0);
+  return { x: m.x + (m.ax || 0) * Math.sin(ph), y: m.y + (m.ay || 0) * Math.sin(ph),
+           vx: (m.ax || 0) * w * Math.cos(ph), vy: (m.ay || 0) * w * Math.cos(ph), w: m.w, h: m.h };
+}
+function collideSeg(b, ax, ay, bx, by, thick, svx = 0, svy = 0) {
+  const abx = bx - ax, aby = by - ay;
+  const l2 = abx * abx + aby * aby || 1;
+  let u = ((b.x - ax) * abx + (b.y - ay) * aby) / l2;
+  u = Math.max(0, Math.min(1, u));
+  const cx = ax + abx * u, cy = ay + aby * u;
+  let dx = b.x - cx, dy = b.y - cy;
+  let d = Math.hypot(dx, dy);
+  const rr = b.r + thick;
+  if (d >= rr) return;
+  if (d < 1e-6) { dx = 0; dy = -1; d = 1; }
+  const nx = dx / d, ny = dy / d;
+  b.x += nx * (rr - d); b.y += ny * (rr - d);
+  let rvx = b.vx - svx, rvy = b.vy - svy;
+  const vn = rvx * nx + rvy * ny;
+  if (vn < 0) {
+    const sp = Math.hypot(rvx, rvy);
+    rvx -= vn * nx; rvy -= vn * ny;
+    // かすめる程度の衝突(地形のカクつき)ではエネルギーを保つ。正面衝突は止まる
+    const sp2 = Math.hypot(rvx, rvy);
+    if (-vn < 0.5 * sp && sp2 > 1e-6) { const k = sp / sp2; rvx *= k; rvy *= k; }
+    b.vx = rvx + svx; b.vy = rvy + svy;
+  }
+  if (ny < -0.2 || !b.contact) { b.contact = true; b.nx = nx; b.ny = ny; }
+}
+function collideAll(b) {
+  const st = STAGES[stage];
+  const k0 = Math.max(0, Math.floor((b.x - b.r - 8) / COL)), k1 = Math.min(N - 2, Math.ceil((b.x + b.r + 8) / COL));
+  for (let k = k0; k <= k1; k++) collideSeg(b, k * COL, hts[k], (k + 1) * COL, hts[k + 1], 0);
+  for (const o of blocksOf()) {
+    collideSeg(b, o.x0, o.y0, o.x1, o.y0, 0); collideSeg(b, o.x0, o.y0, o.x0, o.y1, 0); collideSeg(b, o.x1, o.y0, o.x1, o.y1, 0);
+  }
+  for (const c of st.clouds || []) { // 雲: 下から通り抜けられ、上には乗れる
+    if (b.vy >= 0 && b.y + b.r <= c.y + 10 && b.x >= c.x0 - b.r && b.x <= c.x1 + b.r) collideSeg(b, c.x0, c.y, c.x1, c.y, 2);
+  }
+  for (const r of roads) {
+    const lo = Math.min(r.ax, r.bx), hi = Math.max(r.ax, r.bx);
+    if (hi < b.x - b.r - 8 || lo > b.x + b.r + 8) continue;
+    collideSeg(b, r.ax, r.ay, r.bx, r.by, 3);
+  }
+  for (const m of st.movers || []) {
+    const q = moverNow(m, t0);
+    collideSeg(b, q.x, q.y, q.x + q.w, q.y, 0, q.vx, q.vy); collideSeg(b, q.x, q.y + q.h, q.x + q.w, q.y + q.h, 0, q.vx, q.vy);
+    collideSeg(b, q.x, q.y, q.x, q.y + q.h, 0, q.vx, q.vy); collideSeg(b, q.x + q.w, q.y, q.x + q.w, q.y + q.h, 0, q.vx, q.vy);
+  }
+}
+// x の位置で一番高い足場の y (ジャンプの先読み用)
+function topY(x) {
+  let y = groundY(x);
+  for (const o of blocksOf()) if (x >= o.x0 && x <= o.x1) y = Math.min(y, o.y0);
+  for (const r of roads) {
+    const lo = Math.min(r.ax, r.bx), hi = Math.max(r.ax, r.bx);
+    if (x >= lo && x <= hi && hi > lo) y = Math.min(y, r.ay + (r.by - r.ay) * (x - r.ax) / (r.bx - r.ax));
+  }
+  return y;
+}
+function boost() { // スピードアップマーク
+  const sp = Math.hypot(car.vx, car.vy);
+  if (sp < 1) { car.vx = 200; return; }
+  const ns = Math.max(sp, Math.min(Math.max(sp * 1.6, sp + 180), 700)), k = ns / sp; // 速すぎる車は加速しない(画面外へ飛ぶのを防ぐ)
+  car.vx *= k; car.vy *= k;
+}
+function step(dt) {
+  const s = STAGES[stage];
+  car.vy += 900 * dt * gfac(car);
+  car.cd -= dt; car.sand = false; bounceCd -= dt;
+  applyZones(car, dt, true);
+  if (car.contact && !car.sand && (s.mode === 'drive' || s.mode === 'jump')) {
+    let tx = -car.ny, ty = car.nx; if (tx < 0) { tx = -tx; ty = -ty; }
+    const vt = car.vx * tx + car.vy * ty;
+    if (vt < LD.maxv) { car.vx += tx * LD.accel * dt; car.vy += ty * LD.accel * dt; }
+    if (s.mode === 'jump' && car.cd <= 0) { // 前に壁か穴があれば自動でジャンプ
+      const ty2 = topY(car.x + 36), base = car.y + R;
+      if (ty2 - base > 50 || topY(car.x + 50) < topY(car.x + 30) - 45) { car.vy = -LD.jump; car.cd = 0.7; car.contact = false; sfxJump(); }
+    }
+  }
+  car.x += car.vx * dt; car.y += car.vy * dt;
+  car.contact = false;
+  checkBreaks(car);
+  collideAll(car);
+  if (!car.contact) { car.vx *= 0.99995; } else { car.vx *= 0.99985; car.vy *= 0.99985; }
+  if (car.x < R) { car.x = R; if (car.vx < 0) car.vx = 0; }
+  bouncePads(car);
+  triggerSwitches(car);
+  for (const m of mobs) stepMob(m, dt);
+  for (const q of rocks) {
+    applyZones(q, dt, false);
+    q.vy += 900 * dt * gfac(q); q.x += q.vx * dt; q.y += q.vy * dt; q.contact = false;
+    checkBreaks(q);
+    collideAll(q); q.rot += q.vx * dt / q.r;
+    if (q.grow) q.r = Math.min(q.rmax, q.r + q.grow * dt * Math.min(1, Math.abs(q.vx) / 200)); // 雪玉は転がるほど大きくなる
+    triggerSwitches(q);
+  }
+  rocks = rocks.filter(q => !(q.y > H + 300 || q.x < -200 || q.x > W + 200));
+}
+// ジャンプ台: 乗ると上に跳ね上げる
+function bouncePads(b) {
+  if (bounceCd > 0) return;
+  for (const z of STAGES[stage].zones || []) {
+    if (z.type !== 'bounce') continue;
+    if (b.x >= z.x0 && b.x <= z.x1 && b.y + b.r >= z.y0 - 4 && b.y + b.r <= z.y0 + 24 && b.vy > -50) { b.vy = -(z.v || 700); bounceCd = 0.3; sfxBoost(); return; }
+  }
+}
+// スイッチ: 車・岩・人が上に乗ると対応する扉が開く
+function triggerSwitches(b) {
+  (STAGES[stage].switches || []).forEach(sw => {
+    if (opened[sw.door]) return;
+    if (b.x >= sw.x0 - b.r && b.x <= sw.x1 + b.r && b.y + b.r >= sw.y0 - 30 && b.y - b.r <= sw.y1) { opened[sw.door] = true; sfxBoom(); }
+  });
+}
+// 人・他の車: 歩いて往復する。車とは押し合いになる(質量で決まる)
+function stepMob(m, dt) {
+  m.vy += 900 * dt;
+  if (m.contact) {
+    if (m.x < m.x0) m.dir = 1; else if (m.x > m.x1) m.dir = -1;
+    const want = m.dir * m.spd, a = 600 * dt;
+    m.vx += Math.max(-a, Math.min(a, want - m.vx));
+  }
+  m.x += m.vx * dt; m.y += m.vy * dt; m.contact = false;
+  collideAll(m);
+  const dx = car.x - m.x, dy = car.y - m.y, d = Math.hypot(dx, dy), rr = R + m.r;
+  if (d < rr && d > 1e-6) {
+    const nx = dx / d, ny = dy / d, mc = LD.mass, mm = m.mass, tot = mc + mm;
+    car.x += nx * (rr - d) * mm / tot; car.y += ny * (rr - d) * mm / tot;
+    m.x -= nx * (rr - d) * mc / tot; m.y -= ny * (rr - d) * mc / tot;
+    const vn = (car.vx - m.vx) * nx + (car.vy - m.vy) * ny;
+    if (vn < 0) { const j = -(1 + 0.2) * vn / (1 / mc + 1 / mm); car.vx += j / mc * nx; car.vy += j / mc * ny; m.vx -= j / mm * nx; m.vy -= j / mm * ny; }
+    if (ny < -0.5) { car.contact = true; car.nx = nx; car.ny = ny; }
+  }
+}
+function failRun(msg) {
+  state = 'fail'; engineStop(); sfxFail(); setInfo('失敗: ' + msg); $('go').textContent = 'やり直し';
+}
+function update(dt) {
+  if (state !== 'run') return;
+  t0 += dt;
+  const s = STAGES[stage];
+  for (const q of rockQ) if (!q.done && t0 >= q.at) { q.done = true; rocks.push({ x: q.x, y: q.y, vx: q.vx || 0, vy: q.vy || 0, r: q.r, rot: 0, contact: false, grow: q.grow || 0, rmax: q.rmax || 70 }); }
+  const n = 4; for (let i = 0; i < n; i++) step(dt / n);
+  pads.forEach(p => { if (!p.hit && Math.hypot(car.x - p.px, car.y - p.py) < 36) { p.hit = true; boost(); sfxBoost(); } });
+  marks.forEach(m => { if (!m.hit && Math.hypot(car.x - m.x, car.y - m.y) < 36) { m.hit = true; car.vy = -(m.v || 650); car.vx += m.vx || 0; sfxBoost(); } });
+  warpCd -= dt;
+  for (const w of s.warps || []) if (warpCd <= 0 && Math.hypot(car.x - w.a.x, car.y - w.a.y) < 30) { car.x = w.b.x; car.y = w.b.y; warpCd = 0.6; sfxJump(); }
+  const inFire = (s.zones || []).some(z => z.type === 'fire' && zoneOn(z) && car.x >= z.x0 - 6 && car.x <= z.x1 + 6 && car.y >= z.y0 - R && car.y <= z.y1 + R);
+  heat = Math.max(0, heat + (inFire ? dt : -dt * 0.6));
+  for (const z of s.zones || []) if (z.type === 'lava' && zoneOn(z) && car.x >= z.x0 && car.x <= z.x1 && car.y + R * 0.6 >= z.y0 - (z.rise || 0) * t0 && car.y - R * 0.6 <= z.y1) { failRun(z.bolt ? '雷に打たれた' : '溶岩に落ちた'); return; }
+  for (const z of s.zones || []) if (z.type === 'pull' && z.core && Math.hypot(car.x - z.cx, car.y - z.cy) < z.core) { failRun('吸い込まれた'); return; }
+  (s.crumbles || []).forEach((c, i) => {
+    if (fallen[i]) return;
+    if (crumT[i] === null) { if (car.contact && car.x >= c.x0 - 6 && car.x <= c.x1 + 6 && car.y + R >= c.y0 - 4 && car.y + R <= c.y0 + 8) crumT[i] = 0; }
+    else { crumT[i] += dt; if (crumT[i] > (c.delay || 0.6)) { fallen[i] = true; sfxBoom(); } }
+  });
+  stars.forEach(t => { if (!t.got && Math.hypot(car.x - t.x, car.y - t.y) < 32) { t.got = true; starsGot++; sfxBoost(); } });
+  if (heat > 0.7) { failRun('炎で燃えた'); return; }
+  engineUpdate();
+  const target = car.contact ? Math.atan2(car.nx, -car.ny) : 0;
+  angle += (target - angle) * 0.2;
+  const g = s.goal;
+  if (rocks.some(q => Math.hypot(car.x - q.x, car.y - q.y) < R + q.r - 4)) { failRun('岩にぶつかった'); return; }
+  if (car.x >= g.x - 24 && car.y < groundY(g.x) + 10) {
+    state = 'clear'; engineStop(); sfxClear(); setInfo('ゴール! クリア 🎉' + (stars.length ? '  ★' + starsGot + '/' + stars.length : '')); $('go').textContent = stage < STAGES.length - 1 ? '次のステージへ' : 'もう一度';
+  } else if (car.y > H + 40) {
+    failRun('落下');
+  } else {
+    stuckT = Math.abs(car.x - lastX) < 0.5 ? stuckT + dt : 0; lastX = car.x;
+    if (stuckT > (s.stuck || 2) || t0 > (s.maxT || 30)) failRun('ゴール未達');
+  }
+}
+
+// ---- 描画 ----
+// ---- 車の絵(車ごとに形が違う。プレビューでも使う) ----
+const WHEELX = [[-15, 15], [-21, 21], [-25, 22], [-23, 23]];
+function drawWheel(g, wx, yw, tw, ti, spin) {
+  g.save(); g.translate(wx, yw); g.rotate(spin);
+  g.fillStyle = '#1b1b1b'; g.beginPath(); g.arc(0, 0, tw, 0, 7); g.fill();
+  if (ti === 1) { // 大径: ごついブロックのタイヤ
+    g.fillStyle = '#3d3d3d'; for (let k = 0; k < 10; k++) { g.rotate(Math.PI / 5); g.fillRect(-3, -tw - 2, 6, 6); }
+    g.fillStyle = '#6a6a6a'; g.beginPath(); g.arc(0, 0, tw * 0.55, 0, 7); g.fill(); g.fillStyle = '#c8c8c8'; g.beginPath(); g.arc(0, 0, tw * 0.25, 0, 7); g.fill();
+  } else if (ti === 2) { // スパイク: 青いリムと金属の鋲
+    g.fillStyle = '#3a8dff'; g.beginPath(); g.arc(0, 0, tw * 0.55, 0, 7); g.fill();
+    g.fillStyle = '#f2f2f2'; for (let k = 0; k < 12; k++) { g.rotate(Math.PI / 6); g.beginPath(); g.moveTo(-2, -tw + 1); g.lineTo(0, -tw - 5); g.lineTo(2, -tw + 1); g.fill(); }
+  } else if (ti === 3) { // スリック: つるつる、赤い帯
+    g.strokeStyle = '#ff3b3b'; g.lineWidth = 3; g.beginPath(); g.arc(0, 0, tw - 3, 0, 7); g.stroke();
+    g.fillStyle = '#888'; g.beginPath(); g.arc(0, 0, tw * 0.3, 0, 7); g.fill();
+  } else if (ti === 4) { // 炎: 赤熱したリムとゆらめく炎
+    g.fillStyle = '#ff5a1a'; g.beginPath(); g.arc(0, 0, tw * 0.62, 0, 7); g.fill();
+    g.fillStyle = '#ffd23a'; g.beginPath(); g.arc(0, 0, tw * 0.38, 0, 7); g.fill();
+    g.fillStyle = '#fff6c0'; g.beginPath(); g.arc(0, 0, tw * 0.16, 0, 7); g.fill();
+    g.strokeStyle = '#ff7a1a'; g.lineWidth = 2; g.beginPath(); g.arc(0, 0, tw - 1, 0, 7); g.stroke();
+  } else {
+    g.fillStyle = '#9a9a9a'; g.beginPath(); g.arc(0, 0, tw * 0.45, 0, 7); g.fill(); g.fillStyle = '#555';
+    for (let k = 0; k < 5; k++) { g.rotate(Math.PI * 2 / 5); g.beginPath(); g.arc(tw * 0.25, 0, 1.6, 0, 7); g.fill(); }
+  }
+  g.restore();
+  if (ti === 4) { // 炎はタイヤの回転に関係なく上へ揺れる
+    const tm = performance.now() / 1000;
+    g.save(); g.translate(wx, yw);
+    for (let k = 0; k < 7; k++) {
+      const a = k / 7 * Math.PI * 2 + spin * 0.3, bx = Math.cos(a) * tw, by = Math.sin(a) * tw;
+      const f = 0.6 + 0.4 * Math.sin(tm * 18 + k * 2.1), len = (5 + 6 * f) * (tw / 13);
+      g.fillStyle = k % 2 ? '#ff7a1a' : '#ffb320';
+      g.beginPath(); g.moveTo(bx - 3, by); g.quadraticCurveTo(bx + Math.sin(tm * 12 + k) * 2, by - len * 0.6 - 1, bx + Math.sin(tm * 9 + k) * 2, by - len - Math.max(0, -by) * 0.4); g.lineTo(bx + 3, by); g.closePath(); g.fill();
+    }
+    g.restore();
+  }
+}
+function drawCarSprite(g, ci, ti, r, tt, spin, fast) {
+  const tw = 13 * r / 20, yw = r - tw, cs = CARS[ci], wx = WHEELX[ci];
+  const bob = ci === 3 ? Math.sin(tt * 11) * 1.8 : 0; // バギーは跳ねる
+  const yb = yw + (ci === 1 ? -2 : ci === 2 ? -3 : ci === 3 ? -7 : -4) + bob; // 車体の下端(タイヤの中心より上に置く)
+  g.save();
+  if (ci === 1) { // スポーツ: 低い流線形、窓、ストライプ、スポイラー
+    g.fillStyle = cs.body; g.beginPath(); g.moveTo(-31, yb); g.lineTo(-31, yb - 9); g.lineTo(-13, yb - 12); g.lineTo(-3, yb - 19); g.lineTo(13, yb - 19); g.lineTo(25, yb - 10); g.lineTo(35, yb - 7); g.lineTo(35, yb); g.closePath(); g.fill();
+    g.fillStyle = cs.roof; g.beginPath(); g.moveTo(-2, yb - 12); g.lineTo(2, yb - 17); g.lineTo(12, yb - 17); g.lineTo(19, yb - 11); g.closePath(); g.fill();
+    g.fillStyle = '#fff'; g.fillRect(-29, yb - 6, 62, 2);
+    g.fillStyle = '#222'; g.fillRect(-36, yb - 21, 13, 3); g.fillRect(-31, yb - 18, 3, 9);
+    if (fast) { g.fillStyle = '#ffb347'; g.beginPath(); g.moveTo(-32, yb - 6); g.lineTo(-46 - 8 * Math.abs(Math.sin(tt * 30)), yb - 4); g.lineTo(-32, yb - 2); g.fill(); }
+  } else if (ci === 2) { // トラック: 大きな運転席と荷台、煙突から煙
+    g.fillStyle = '#7a5a2a'; g.fillRect(-40, yb - 20, 38, 20); g.strokeStyle = '#4a3515'; g.lineWidth = 2; g.strokeRect(-40, yb - 20, 38, 20);
+    g.beginPath(); g.moveTo(-28, yb - 20); g.lineTo(-28, yb); g.moveTo(-15, yb - 20); g.lineTo(-15, yb); g.stroke();
+    g.fillStyle = cs.body; g.fillRect(2, yb - 28, 34, 28); g.fillStyle = cs.roof; g.fillRect(8, yb - 25, 16, 12);
+    g.fillStyle = '#555'; g.fillRect(0, yb - 38, 4, 18);
+    g.fillStyle = 'rgba(210,210,210,.7)'; for (let k = 0; k < 3; k++) { const ph = (tt * 1.3 + k * .33) % 1; g.beginPath(); g.arc(2 - ph * 14, yb - 40 - ph * 16, 3 + ph * 5, 0, 7); g.fill(); }
+  } else if (ci === 3) { // バギー: むき出しの骨組み、サスペンション
+    g.fillStyle = cs.body; g.fillRect(-26, yb - 7, 56, 7);
+    g.strokeStyle = '#222'; g.lineWidth = 3; g.lineJoin = 'round'; g.beginPath(); g.moveTo(-12, yb - 7); g.lineTo(-9, yb - 26); g.lineTo(11, yb - 26); g.lineTo(17, yb - 7); g.moveTo(-9, yb - 26); g.lineTo(11, yb - 12); g.stroke();
+    g.fillStyle = cs.roof; g.fillRect(-4, yb - 15, 9, 8);
+    g.strokeStyle = '#555'; g.lineWidth = 2; g.beginPath(); g.moveTo(30, yb - 3); g.lineTo(38, yb - 5); g.moveTo(-26, yb - 3); g.lineTo(-33, yb - 9); g.stroke();
+    g.strokeStyle = '#9aa'; g.lineWidth = 2; for (const x of wx) { g.beginPath(); g.moveTo(x, yb - 4); g.lineTo(x, yw); g.stroke(); }
+  } else { // 標準: セダン
+    g.fillStyle = cs.body; g.fillRect(-27, yb - 16, 54, 16); g.fillStyle = cs.roof; g.beginPath(); g.moveTo(-12, yb - 16); g.lineTo(-7, yb - 27); g.lineTo(11, yb - 27); g.lineTo(18, yb - 16); g.closePath(); g.fill();
+    g.fillStyle = '#fff'; g.fillRect(24, yb - 11, 4, 4);
+  }
+  for (const x of wx) drawWheel(g, x, yw, tw, ti, spin);
+  g.restore();
+}
+function drawPreview() {
+  const pv = $('pv'); if (!pv || !pv.getContext) return;
+  const g = pv.getContext('2d'); g.clearRect(0, 0, pv.width, pv.height);
+  g.fillStyle = 'rgba(255,255,255,.08)'; g.fillRect(0, 0, pv.width, pv.height);
+  g.save(); g.translate(pv.width / 2, pv.height - 18 - TIRES[tireSel].r * 1.3); g.scale(1.3, 1.3);
+  const tt = performance.now() / 1000;
+  drawCarSprite(g, carSel, tireSel, TIRES[tireSel].r, tt, tt * 4, false);
+  g.restore(); g.fillStyle = '#6b6f76'; g.fillRect(0, pv.height - 18, pv.width, 18);
+}
+function drawRock(r, rot) {
+  ctx.rotate(rot); ctx.fillStyle = '#8d7b68'; ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#5b4d3f'; ctx.lineWidth = 4; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-r * 0.5, -r * 0.3); ctx.lineTo(-r * 0.1, r * 0.1); ctx.lineTo(r * 0.4, -r * 0.4);
+  ctx.moveTo(r * 0.1, r * 0.1); ctx.lineTo(r * 0.2, r * 0.6); ctx.stroke(); ctx.rotate(-rot);
+}
+function drawExtras() {
+  const st = STAGES[stage], tt = state === 'run' ? t0 : performance.now() / 1000;
+  for (const c of st.clouds || []) {
+    ctx.fillStyle = 'rgba(255,255,255,.95)'; ctx.beginPath();
+    const n = Math.max(2, Math.round((c.x1 - c.x0) / 28));
+    for (let i = 0; i < n; i++) { ctx.moveTo(c.x0 + (i + .5) * (c.x1 - c.x0) / n + 16, c.y - 4); ctx.arc(c.x0 + (i + .5) * (c.x1 - c.x0) / n, c.y - 4, 16, 0, 7); }
+    ctx.fill(); ctx.fillRect(c.x0, c.y - 6, c.x1 - c.x0, 8);
+  }
+  (st.doors || []).forEach((d, i) => { if (opened[i]) return;
+    ctx.fillStyle = '#8b2c2c'; ctx.fillRect(d.x0, d.y0, d.x1 - d.x0, d.y1 - d.y0); ctx.strokeStyle = '#4a1010'; ctx.lineWidth = 3; ctx.strokeRect(d.x0, d.y0, d.x1 - d.x0, d.y1 - d.y0);
+    ctx.fillStyle = '#ffd24d'; ctx.beginPath(); ctx.arc((d.x0 + d.x1) / 2, (d.y0 + d.y1) / 2, 6, 0, 7); ctx.fill(); });
+  (st.crumbles || []).forEach((c, i) => { if (fallen[i]) return; const sh = crumT[i] !== null ? Math.sin(tt * 60) * 2 : 0;
+    ctx.fillStyle = '#b9c7d6'; ctx.fillRect(c.x0 + sh, c.y0, c.x1 - c.x0, Math.min(c.y1 - c.y0, 22)); ctx.strokeStyle = '#6b7c8f'; ctx.lineWidth = 2; ctx.strokeRect(c.x0 + sh, c.y0, c.x1 - c.x0, Math.min(c.y1 - c.y0, 22));
+    ctx.beginPath(); ctx.moveTo(c.x0 + 14 + sh, c.y0); ctx.lineTo(c.x0 + 22 + sh, c.y0 + 11); ctx.lineTo(c.x0 + 30 + sh, c.y0 + 22); ctx.stroke(); });
+  stars.forEach(t => { if (t.got) return; ctx.fillStyle = '#ffd400'; ctx.strokeStyle = '#b8860b'; ctx.lineWidth = 2; ctx.beginPath();
+    for (let k = 0; k < 10; k++) { const rr = k % 2 ? 7 : 16, ang = -Math.PI / 2 + k * Math.PI / 5; ctx.lineTo(t.x + Math.cos(ang) * rr, t.y + Math.sin(ang) * rr); } ctx.closePath(); ctx.fill(); ctx.stroke(); });
+  (st.switches || []).forEach(sw => { const on = opened[sw.door];
+    ctx.fillStyle = on ? '#2e7d32' : '#e53935'; ctx.fillRect(sw.x0, sw.y0 + (on ? 8 : 0), sw.x1 - sw.x0, sw.y1 - sw.y0 - (on ? 8 : 0)); ctx.strokeStyle = '#222'; ctx.lineWidth = 2; ctx.strokeRect(sw.x0, sw.y0 + (on ? 8 : 0), sw.x1 - sw.x0, sw.y1 - sw.y0 - (on ? 8 : 0)); });
+  marks.forEach(m => { ctx.globalAlpha = m.hit ? 0.25 : 1; ctx.strokeStyle = '#ff7ab8'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(m.x, m.y, 24, 0, 7); ctx.stroke();
+    ctx.fillStyle = '#ff7ab8'; ctx.beginPath(); ctx.moveTo(m.x, m.y - 14); ctx.lineTo(m.x + 11, m.y + 8); ctx.lineTo(m.x - 11, m.y + 8); ctx.fill(); ctx.globalAlpha = 1; });
+  for (const w of st.warps || []) for (const q of [w.a, w.b]) { ctx.strokeStyle = q === w.a ? '#8e5cff' : '#3ad1ff'; ctx.lineWidth = 4;
+    for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.arc(q.x, q.y, 10 + i * 8 + Math.sin(tt * 4 + i) * 2, 0, 7); ctx.stroke(); } }
+  for (const m of mobs) { ctx.save(); ctx.translate(m.x, m.y);
+    if (m.kind === 'car') { ctx.fillStyle = '#3a8dff'; ctx.fillRect(-m.r - 6, -m.r * 0.6, 2 * m.r + 12, m.r * 0.9); ctx.fillStyle = '#222'; for (const wx of [-m.r * 0.6, m.r * 0.6]) { ctx.beginPath(); ctx.arc(wx, m.r * 0.5, 7, 0, 7); ctx.fill(); } }
+    else if (m.kind === 'monster') { ctx.fillStyle = '#5aa84a'; ctx.beginPath(); ctx.arc(0, 0, m.r, 0, 7); ctx.fill(); ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(-m.r * .35, -m.r * .2, m.r * .22, 0, 7); ctx.arc(m.r * .35, -m.r * .2, m.r * .22, 0, 7); ctx.fill(); ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(-m.r * .3 + m.dir * 3, -m.r * .2, m.r * .1, 0, 7); ctx.arc(m.r * .4 + m.dir * 3, -m.r * .2, m.r * .1, 0, 7); ctx.fill(); ctx.strokeStyle = '#2d5a24'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, m.r * .25, m.r * .35, 0.2, Math.PI - 0.2); ctx.stroke(); }
+    else { ctx.fillStyle = '#f5c27a'; ctx.beginPath(); ctx.arc(0, -m.r * .55, m.r * .45, 0, 7); ctx.fill(); ctx.fillStyle = '#e0457b'; ctx.fillRect(-m.r * .4, -m.r * .1, m.r * .8, m.r * 1.0); ctx.fillStyle = '#333'; ctx.fillRect(-m.r * .35, m.r * .9, m.r * .25, m.r * .1 + 2); ctx.fillRect(m.r * .1, m.r * .9, m.r * .25, m.r * .1 + 2); }
+    ctx.restore(); }
+  if (heat > 0.02) { ctx.fillStyle = '#222'; ctx.fillRect(car.x - 24, car.y - 44, 48, 6); ctx.fillStyle = '#ff6a1a'; ctx.fillRect(car.x - 24, car.y - 44, 48 * Math.min(1, heat / 0.7), 6); }
+}
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.beginPath(); ctx.moveTo(0, H + 5);
+  for (let k = 0; k < N; k++) ctx.lineTo(k * COL, Math.min(hts[k], H + 5));
+  ctx.lineTo(W, H + 5); ctx.closePath();
+  ctx.fillStyle = theme().ground; ctx.fill();
+  ctx.beginPath();
+  for (let k = 0; k < N; k++) { const y = Math.min(hts[k], H + 5); k ? ctx.lineTo(k * COL, y) : ctx.moveTo(0, y); }
+  ctx.strokeStyle = theme().edge; ctx.lineWidth = 5; ctx.lineJoin = 'round'; ctx.stroke();
+  for (const b of STAGES[stage].iron || []) {
+    ctx.fillStyle = '#6b7280'; ctx.fillRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+    ctx.strokeStyle = '#374151'; ctx.lineWidth = 3; ctx.strokeRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+    ctx.fillStyle = '#9ca3af';
+    for (let yy = b.y0 + 12; yy < Math.min(b.y1, H) - 6; yy += 28) for (const xx of [b.x0 + 8, b.x1 - 8]) { ctx.beginPath(); ctx.arc(xx, yy, 3, 0, 7); ctx.fill(); }
+  }
+  const tt = state === 'run' ? t0 : performance.now() / 1000;
+  (STAGES[stage].zones || []).forEach(z => {
+    const w = z.x1 - z.x0, h = z.y1 - z.y0, on = zoneOn(z) || state !== 'run';
+    ctx.save(); ctx.beginPath(); ctx.rect(z.x0, z.y0, w, h); ctx.clip();
+    if (z.type === 'sand') {
+      ctx.fillStyle = 'rgba(214,170,90,.55)'; ctx.fillRect(z.x0, z.y0, w, h);
+      ctx.fillStyle = 'rgba(150,100,40,.6)'; for (let i = 0; i < w / 12; i++) { ctx.fillRect(z.x0 + (i * 37 + tt * 20) % w, z.y0 + (i * 53) % h, 3, 3); }
+    } else if (z.type === 'ice') {
+      ctx.fillStyle = 'rgba(170,225,255,.6)'; ctx.fillRect(z.x0, z.y0, w, h); ctx.fillStyle = 'rgba(255,255,255,.8)';
+      for (let i = 0; i < w / 22; i++) ctx.fillRect(z.x0 + i * 22 + 4, z.y0 + (i * 29) % h, 10, 2);
+    } else if (z.type === 'fire') {
+      ctx.fillStyle = 'rgba(255,120,30,.28)'; ctx.fillRect(z.x0, z.y0, w, h);
+      for (let x = z.x0; x < z.x1; x += 14) { const hh = 20 + 16 * Math.abs(Math.sin(tt * 7 + x)); ctx.fillStyle = '#ff7a1a'; ctx.beginPath(); ctx.moveTo(x, z.y1); ctx.lineTo(x + 7, z.y1 - hh); ctx.lineTo(x + 14, z.y1); ctx.fill(); ctx.fillStyle = '#ffd24d'; ctx.beginPath(); ctx.moveTo(x + 3, z.y1); ctx.lineTo(x + 7, z.y1 - hh * .55); ctx.lineTo(x + 11, z.y1); ctx.fill(); }
+    } else if (z.type === 'lava') {
+      const yy = z.y0 - (z.rise || 0) * (state === 'run' ? t0 : 0);
+      if (z.bolt) { if (zoneOn(z) && state === 'run' || state !== 'run') { ctx.strokeStyle = 'rgba(255,240,120,.9)'; ctx.lineWidth = 4; ctx.beginPath(); for (let x = z.x0 + 10; x < z.x1; x += 40) { ctx.moveTo(x, 0); ctx.lineTo(x + 8, 120); ctx.lineTo(x - 6, 200); ctx.lineTo(x + 6, z.y1); } ctx.stroke(); } }
+      else { ctx.fillStyle = '#e8451a'; ctx.fillRect(z.x0, yy, w, z.y1 - yy + 20); ctx.fillStyle = '#ffb347'; ctx.beginPath(); for (let x = z.x0; x <= z.x1; x += 8) ctx.lineTo(x, yy + Math.sin(tt * 3 + x * .1) * 3); ctx.lineTo(z.x1, yy + 12); ctx.lineTo(z.x0, yy + 12); ctx.fill(); }
+    } else if (z.type === 'pull') {
+      ctx.strokeStyle = z.k < 0 ? 'rgba(255,120,120,.7)' : 'rgba(90,60,160,.7)'; ctx.lineWidth = 3;
+      for (let i = 0; i < 4; i++) { ctx.beginPath(); for (let a2 = 0; a2 < 5.5; a2 += .2) { const rr = z.rad * (0.25 + i * .2) * (1 - a2 / 14), ang = a2 + tt * 2 * (z.k < 0 ? -1 : 1) + i * 1.5; ctx.lineTo(z.cx + Math.cos(ang) * rr, z.cy + Math.sin(ang) * rr); } ctx.stroke(); }
+    } else if (z.type === 'water') {
+      ctx.fillStyle = 'rgba(40,120,220,.4)'; ctx.fillRect(z.x0, z.y0, w, h); ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.lineWidth = 2;
+      ctx.beginPath(); for (let x = z.x0; x <= z.x1; x += 8) ctx.lineTo(x, z.y0 + 3 + Math.sin(tt * 3 + x * .07) * 3); ctx.stroke();
+    } else if (z.type === 'gravity') {
+      ctx.fillStyle = 'rgba(150,100,255,.18)'; ctx.fillRect(z.x0, z.y0, w, h); ctx.fillStyle = 'rgba(220,200,255,.8)';
+      for (let i = 0; i < 12; i++) { const ph = (tt * .4 + i * .31) % 1; ctx.beginPath(); ctx.arc(z.x0 + (i * 67) % w, z.y1 - ph * h, 3, 0, 7); ctx.fill(); }
+    } else if (z.type === 'bounce') {
+      ctx.fillStyle = '#e53935'; ctx.fillRect(z.x0, z.y0, w, 8); ctx.strokeStyle = '#888'; ctx.lineWidth = 3;
+      ctx.beginPath(); for (let x = z.x0 + 6; x < z.x1; x += 12) { ctx.moveTo(x, z.y0 + 8); ctx.lineTo(x + 6, z.y0 + 18); ctx.lineTo(x - 0, z.y0 + 28); } ctx.stroke();
+    } else if (z.type === 'belt') {
+      ctx.fillStyle = 'rgba(40,40,40,.6)'; ctx.fillRect(z.x0, z.y1 - 36, w, 12);
+      ctx.fillStyle = '#ffd24d'; const o = (tt * z.bs * 0.5) % 24;
+      for (let x = z.x0 - 24 + (o + 24) % 24; x < z.x1; x += 24) { ctx.beginPath(); ctx.moveTo(x, z.y1 - 36); ctx.lineTo(x + 8 * Math.sign(z.bs), z.y1 - 30); ctx.lineTo(x, z.y1 - 24); ctx.fill(); }
+    } else if (on) { // 風・風車
+      ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 2;
+      const dx = Math.sign(z.fx || 0), dy = Math.sign(z.fy || 0);
+      for (let i = 0; i < 14; i++) {
+        const ph = (tt * 0.9 + i * 0.37) % 1, sx = z.x0 + (i * 71) % w, sy = z.y0 + (i * 47) % h;
+        const px = sx + dx * ph * 120, py = sy + dy * ph * 120;
+        ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px + dx * 26, py + dy * 26); ctx.stroke();
+      }
+    }
+    ctx.restore();
+    if (z.type === 'fan') { // 風車の羽根
+      const cx = (z.x0 + z.x1) / 2, cy = z.y1 - 8;
+      ctx.fillStyle = '#666'; ctx.fillRect(cx - 4, cy - 30, 8, 38);
+      ctx.save(); ctx.translate(cx, cy - 30); ctx.rotate(tt * 6); ctx.fillStyle = '#eee';
+      for (let i = 0; i < 4; i++) { ctx.rotate(Math.PI / 2); ctx.fillRect(-4, -34, 8, 34); }
+      ctx.restore();
+    }
+  });
+  (STAGES[stage].breaks || []).forEach((b, i) => {
+    if (broken[i]) return;
+    ctx.fillStyle = b.hot ? '#bfe6ff' : '#b5651d'; ctx.fillRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+    ctx.strokeStyle = b.hot ? '#5aa9d6' : '#6b3a10'; ctx.lineWidth = 3; ctx.strokeRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+    ctx.fillStyle = '#ff5a36'; ctx.font = 'bold 16px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(b.hot ? '🧊' : '💥', (b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2 + 6); ctx.textAlign = 'left';
+  });
+  for (const b of STAGES[stage].pipes || []) {
+    if (b.cactus) {
+      const cw = b.x1 - b.x0, mx = (b.x0 + b.x1) / 2, top = b.y0, bot = Math.min(b.y1, H);
+      ctx.fillStyle = '#3f9a4a'; ctx.fillRect(b.x0 + cw * 0.2, top, cw * 0.6, bot - top);
+      ctx.fillRect(b.x0 - 6, top + (bot - top) * 0.3, 8, 6); ctx.fillRect(b.x0 - 6, top + (bot - top) * 0.15, 6, (bot - top) * 0.2);
+      ctx.fillStyle = '#e8f5d0'; for (let y = top + 8; y < Math.min(bot, H) - 6; y += 16) { ctx.fillRect(mx - 9, y, 3, 3); ctx.fillRect(mx + 6, y + 6, 3, 3); }
+      continue;
+    }
+    ctx.fillStyle = '#2e9e4f'; ctx.fillRect(b.x0, b.y0, b.x1 - b.x0, Math.min(b.y1, H) - b.y0);
+    ctx.fillStyle = '#1f7a3a'; ctx.fillRect(b.x0 - 5, b.y0, b.x1 - b.x0 + 10, 16);
+    ctx.fillStyle = '#7ee09a'; ctx.fillRect(b.x0 + 5, b.y0 + 16, 5, Math.min(b.y1, H) - b.y0 - 16);
+  }
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+  ctx.beginPath(); for (const r of roads) { ctx.moveTo(r.ax, r.ay); ctx.lineTo(r.bx, r.by); } ctx.stroke();
+  for (const m of STAGES[stage].movers || []) {
+    const q = moverNow(m, state === 'run' ? t0 : 0);
+    ctx.fillStyle = '#f5a623'; ctx.fillRect(q.x, q.y, q.w, q.h);
+    ctx.fillStyle = '#222';
+    for (let xx = q.x - q.h; xx < q.x + q.w; xx += 24) { ctx.beginPath(); ctx.moveTo(Math.max(xx, q.x), q.y + q.h); ctx.lineTo(Math.max(xx + 12, q.x), q.y + q.h); ctx.lineTo(Math.min(xx + q.h + 12, q.x + q.w), q.y); ctx.lineTo(Math.min(xx + q.h, q.x + q.w), q.y); ctx.fill(); }
+    ctx.strokeStyle = '#222'; ctx.lineWidth = 3; ctx.strokeRect(q.x, q.y, q.w, q.h);
+  }
+  for (const q of rockQ) if (!q.done) { ctx.save(); ctx.translate(q.x, q.y); drawRock(q.r, 0); ctx.restore(); }
+  for (const q of rocks) { ctx.save(); ctx.translate(q.x, q.y); drawRock(q.r, q.rot); ctx.restore(); }
+  drawExtras();
+  for (const p of pads) {
+    ctx.globalAlpha = p.hit ? 0.3 : 1; ctx.fillStyle = '#ffe14d'; ctx.beginPath(); ctx.arc(p.px, p.py, 24, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#d17b00'; ctx.lineWidth = 4; ctx.lineJoin = 'round';
+    for (const dx of [-8, 4]) { ctx.beginPath(); ctx.moveTo(p.px + dx, p.py - 11); ctx.lineTo(p.px + dx + 10, p.py); ctx.lineTo(p.px + dx, p.py + 11); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+  }
+  // goal / start
+  const g = STAGES[stage].goal, gy = groundY(g.x);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(g.x, gy); ctx.lineTo(g.x, gy - 60); ctx.stroke();
+  ctx.fillStyle = '#e53935'; ctx.beginPath(); ctx.moveTo(g.x, gy - 60); ctx.lineTo(g.x + 32, gy - 50); ctx.lineTo(g.x, gy - 40); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = '14px sans-serif'; ctx.fillText('GOAL', g.x - 14, gy - 66);
+  const ar = STAGES[stage].area;
+  if (ar) {
+    ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, H);
+    for (const r of ar) ctx.rect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
+    ctx.fillStyle = 'rgba(20,30,50,.28)'; ctx.fill('evenodd');
+    ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 2; ctx.setLineDash([8, 6]);
+    for (const r of ar) { ctx.strokeStyle = r.tool === 'carve' ? 'rgba(255,190,120,.95)' : r.tool === 'road' ? 'rgba(170,220,255,.95)' : 'rgba(255,255,255,.85)'; ctx.strokeRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0); }
+    ctx.restore();
+  }
+  // car
+  ctx.save(); ctx.translate(car.x, car.y); ctx.rotate(angle);
+  const spd = Math.hypot(car.vx, car.vy);
+  if (state === 'run' && spd > 230) { // スピード線
+    ctx.restore(); ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 2;
+    const ux = car.vx / spd, uy = car.vy / spd;
+    for (let k = 0; k < 4; k++) { const off = (k - 1.5) * 9, bx = car.x - ux * 34 - uy * off, by = car.y - uy * 34 + ux * off; ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx - ux * (22 + k * 5), by - uy * (22 + k * 5)); ctx.stroke(); }
+    ctx.restore(); ctx.save(); ctx.translate(car.x, car.y); ctx.rotate(angle);
+  }
+  drawCarSprite(ctx, carSel, tireSel, R, state === 'run' ? t0 : performance.now() / 1000, car.x / (13 * R / 20), spd > 230);
+  ctx.restore();
+  if (state === 'clear' || state === 'fail') {
+    ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, H / 2 - 40, W, 80);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 36px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(state === 'clear' ? 'CLEAR!' : 'FAILED', W / 2, H / 2 + 12); ctx.textAlign = 'left';
+  }
+}
+let last = performance.now();
+// 物理は固定時間刻み(1/60秒)。画面のリフレッシュレートや速度ボタンで結果が変わらないようにする
+const STEP = 1 / 60;
+let acc = 0;
+function loop(now) {
+  acc += Math.min(0.1, Math.max(0, (now - last) / 1000)) * speed; last = now;
+  let n = 0;
+  while (acc >= STEP && n < speed * 6 + 6) { update(STEP); acc -= STEP; n++; }
+  if (n >= speed * 6 + 6) acc = 0; // 処理が追いつかないときは捨てる(結果は変わらない)
+  render(); drawPreview(); requestAnimationFrame(loop);
+}
+function fit() {
+  const a = $('mid').getBoundingClientRect(), aw = a.width - $('side').offsetWidth - 10, k = Math.min(aw / W, a.height / H);
+  cv.style.width = Math.floor(W * k) + 'px'; cv.style.height = Math.floor(H * k) + 'px';
+}
+addEventListener('resize', fit);
+loadStage(0);
+fit(); setTimeout(fit, 100);
+requestAnimationFrame(loop);
+</script>
+<script src="../assets/back-button.js"></script>
+</body>
+</html>

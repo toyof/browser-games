@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Planet Merge</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05060f; color: #cde; font-family: monospace; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  canvas { background: #0c0e1c; border: 2px solid #335; max-width: 100%; max-height: 92vh; touch-action: none; }
+  p { margin: 6px; font-size: 12px; opacity: .8; }
+</style>
+</head>
+<body>
+<canvas id="c" width="640" height="760"></canvas>
+<p>マウス/タッチ: 位置決め→クリックで落下 　←→/AD: 移動 　Space/↓: 落下 　R: リトライ 　M: 音</p>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script>
+const { Engine, World, Bodies, Body, Events, Composite } = Matter;
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const BOX_L = 40, BOX_R = 400, BOX_BOT = 730, DROP_Y = 100, LIMIT_Y = 190;
+const OVER_SECONDS = 2.0, COOLDOWN = 0.5, GRACE = 1.0;
+const PLANETS = [
+  ['Moon', 14, '#c8c8cd'], ['Mercury', 20, '#a08c78'], ['Mars', 27, '#c85a3c'], ['Venus', 34, '#e6be64'],
+  ['Earth', 43, '#4682dc'], ['Neptune', 53, '#3c5ac8'], ['Uranus', 64, '#78dcdc'], ['Saturn', 76, '#dcb478'],
+  ['Jupiter', 90, '#c88c5a'], ['Sun', 106, '#faaa28'], ['Nova', 124, '#fff0c8'],
+];
+const MAX_LV = PLANETS.length - 1;
+const SCORES = [1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 100];
+const SPAWN_MAX_LV = 4;
+
+// ---------- 音 (WebAudio合成) ----------
+let muted = false, actx = null;
+function tone(freq, dur, vol) {
+  if (muted) return;
+  try {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime;
+    o.frequency.value = freq; g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur);
+  } catch (e) {}
+}
+
+// ---------- 状態 ----------
+let hi = 0; try { hi = +localStorage.getItem('suikaHi') || 0; } catch (e) {}
+let engine, score, state, cur, next, holdX, cooldown, overTimer, chain, chainT, particles, now;
+
+function newLv() { return Math.floor(Math.random() * (SPAWN_MAX_LV + 1)); }
+function addPlanet(lv, x, y) {
+  const b = Bodies.circle(x, y, PLANETS[lv][1], { restitution: 0.1, friction: 0.3, frictionAir: 0.001, density: 0.001 });
+  b.lv = lv; b.born = now; b.dead = false;
+  World.add(engine.world, b);
+  return b;
+}
+function reset() {
+  engine = Engine.create({ gravity: { x: 0, y: 1.2 } });
+  const t = 20, wall = o => Bodies.rectangle(o[0], o[1], o[2], o[3], { isStatic: true, friction: 0.3 });
+  World.add(engine.world, [
+    wall([BOX_L - t / 2, (150 + BOX_BOT) / 2 + 200, t, BOX_BOT + 400 - 150]),
+    wall([BOX_R + t / 2, (150 + BOX_BOT) / 2 + 200, t, BOX_BOT + 400 - 150]),
+    wall([(BOX_L + BOX_R) / 2, BOX_BOT + t / 2, BOX_R - BOX_L + 2 * t, t]),
+  ]);
+  Events.on(engine, 'collisionStart', ev => ev.pairs.forEach(p => tryMerge(p.bodyA, p.bodyB)));
+  score = 0; state = 'play'; cur = newLv(); next = newLv(); holdX = (BOX_L + BOX_R) / 2;
+  cooldown = 0; overTimer = 0; chain = 0; chainT = 0; particles = []; now = 0;
+}
+function tryMerge(a, b) {
+  if (a.lv === undefined || b.lv === undefined || a.lv !== b.lv || a.dead || b.dead || state !== 'play') return;
+  a.dead = b.dead = true;
+  const lv = a.lv, x = (a.position.x + b.position.x) / 2, y = (a.position.y + b.position.y) / 2;
+  chain = chainT > 0 ? chain + 1 : 1; chainT = 0.8;
+  const bonus = 1 + 0.5 * (chain - 1);
+  World.remove(engine.world, [a, b]);
+  burst(x, y, PLANETS[lv][2], 10 + lv);
+  tone(300 + lv * 70, 0.18, 0.15);
+  if (lv === MAX_LV) { score += Math.floor(SCORES[MAX_LV] * bonus); return; }
+  score += Math.floor(SCORES[lv + 1] * bonus);
+  const n = addPlanet(lv + 1, x, y); n.born = now - GRACE; // 合体直後でもライン判定は有効
+}
+function burst(x, y, col, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283, s = 40 + Math.random() * 140;
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.5, col });
+  }
+}
+function drop() {
+  if (state !== 'play' || cooldown > 0) return;
+  const r = PLANETS[cur][1], x = Math.min(BOX_R - r, Math.max(BOX_L + r, holdX));
+  addPlanet(cur, x, DROP_Y);
+  tone(180, 0.08, 0.1);
+  cur = next; next = newLv(); cooldown = COOLDOWN;
+}
+
+// ---------- 更新 ----------
+let acc = 0, last = performance.now();
+function update(dt) {
+  if (state !== 'play') return;
+  acc += dt;
+  while (acc >= 1 / 60) { Engine.update(engine, 1000 / 60); now += 1 / 60; acc -= 1 / 60;
+    if (cooldown > 0) cooldown -= 1 / 60; if (chainT > 0) chainT -= 1 / 60; }
+  if (keys.ArrowLeft || keys.KeyA) holdX -= 260 * dt;
+  if (keys.ArrowRight || keys.KeyD) holdX += 260 * dt;
+  const r = PLANETS[cur][1]; holdX = Math.min(BOX_R - r, Math.max(BOX_L + r, holdX));
+  const danger = Composite.allBodies(engine.world).some(b => !b.isStatic && b.lv !== undefined &&
+    now - b.born > GRACE && b.position.y - PLANETS[b.lv][1] < LIMIT_Y && Math.hypot(b.velocity.x, b.velocity.y) < 1.2);
+  overTimer = danger ? overTimer + dt : 0;
+  if (overTimer >= OVER_SECONDS) {
+    state = 'over'; tone(110, 0.6, 0.2);
+    if (score > hi) { hi = score; try { localStorage.setItem('suikaHi', hi); } catch (e) {} }
+  }
+  particles.forEach(p => { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; });
+  particles = particles.filter(p => p.life > 0);
+}
+
+// ---------- 描画 ----------
+function drawPlanet(lv, x, y, r, angle) {
+  const g = ctx.createRadialGradient(x - r * .35, y - r * .35, r * .1, x, y, r);
+  g.addColorStop(0, '#fffa'); g.addColorStop(.35, PLANETS[lv][2]); g.addColorStop(1, '#000b');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, 6.283); ctx.fill();
+  if (lv === 7) { ctx.strokeStyle = '#fff8'; ctx.lineWidth = 3; ctx.beginPath(); ctx.ellipse(x, y, r * 1.35, r * .35, -.3, 0, 6.283); ctx.stroke(); }
+  if (lv >= 3) { ctx.fillStyle = '#fff'; ctx.font = Math.max(10, r * .3) + 'px monospace'; ctx.textAlign = 'center';
+    ctx.fillText(PLANETS[lv][0], x, y + r * .1); }
+}
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  // 容器
+  ctx.strokeStyle = '#5a6496'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(BOX_L, 150); ctx.lineTo(BOX_L, BOX_BOT); ctx.lineTo(BOX_R, BOX_BOT); ctx.lineTo(BOX_R, 150); ctx.stroke();
+  ctx.strokeStyle = overTimer > 0 ? '#f55' : '#fff3'; ctx.setLineDash([8, 8]); ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(BOX_L, LIMIT_Y); ctx.lineTo(BOX_R, LIMIT_Y); ctx.stroke(); ctx.setLineDash([]);
+  Composite.allBodies(engine.world).forEach(b => { if (!b.isStatic) drawPlanet(b.lv, b.position.x, b.position.y, PLANETS[b.lv][1]); });
+  particles.forEach(p => { ctx.globalAlpha = Math.max(0, p.life * 2); ctx.fillStyle = p.col; ctx.fillRect(p.x, p.y, 4, 4); }); ctx.globalAlpha = 1;
+  if (state === 'play') {
+    const r = PLANETS[cur][1] * (1 - Math.max(0, cooldown) / COOLDOWN * 0.6);
+    ctx.strokeStyle = '#fff2'; ctx.beginPath(); ctx.moveTo(holdX, DROP_Y); ctx.lineTo(holdX, BOX_BOT); ctx.stroke();
+    drawPlanet(cur, holdX, DROP_Y, r);
+  }
+  // サイドパネル
+  ctx.fillStyle = '#cde'; ctx.textAlign = 'left'; ctx.font = '16px monospace';
+  ctx.fillText('SCORE ' + score, 430, 50); ctx.fillText('BEST  ' + Math.max(hi, score), 430, 74);
+  ctx.fillText('NEXT', 430, 120); drawPlanet(next, 480, 170, Math.min(PLANETS[next][1], 40));
+  ctx.font = '12px monospace'; ctx.fillText('進化の順', 430, 240);
+  PLANETS.forEach((p, i) => { const y = 262 + i * 40; drawPlanet(i, 450, y, Math.min(14, p[1]) );
+    ctx.fillStyle = '#cde'; ctx.textAlign = 'left'; ctx.fillText(p[0], 475, y + 4); });
+  if (state === 'over') {
+    ctx.fillStyle = '#000b'; ctx.fillRect(BOX_L, 250, BOX_R - BOX_L, 200);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = '28px monospace';
+    ctx.fillText('GAME OVER', (BOX_L + BOX_R) / 2, 320);
+    ctx.font = '16px monospace'; ctx.fillText('SCORE ' + score, (BOX_L + BOX_R) / 2, 355);
+    ctx.fillText('R / タップでリトライ', (BOX_L + BOX_R) / 2, 400);
+  }
+}
+
+// ---------- 入力 ----------
+const keys = {};
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['Space', 'ArrowLeft', 'ArrowRight', 'ArrowDown'].includes(e.code)) e.preventDefault();
+  if ((e.code === 'Space' || e.code === 'ArrowDown') && !e.repeat) drop();
+  if (e.code === 'KeyR') reset();
+  if (e.code === 'KeyM') muted = !muted;
+});
+addEventListener('keyup', e => keys[e.code] = false);
+function px(e) { const r = cv.getBoundingClientRect(); return (e.clientX - r.left) * W / r.width; }
+cv.addEventListener('pointermove', e => { holdX = px(e); });
+cv.addEventListener('pointerdown', e => {
+  holdX = px(e);
+  if (state === 'over') { reset(); return; }
+  if (e.pointerType === 'mouse') drop();
+});
+cv.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') drop(); }); // タッチは指を離した位置で落下
+
+reset();
+(function loop(t) {
+  const dt = Math.min(0.05, (t - last) / 1000); last = t;
+  update(dt); draw(); requestAnimationFrame(loop);
+})(last);
+</script>
+<script src="../assets/back-button.js"></script>
+</body>
+</html>

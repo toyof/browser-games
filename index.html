@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Game Station</title>
+<style>
+  html, body { margin: 0; min-height: 100%; background: #05060f; color: #cde; font-family: monospace; }
+  canvas#stars { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; }
+  main { position: relative; z-index: 1; max-width: 880px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { text-align: center; letter-spacing: .3em; margin: 16px 0 4px; text-shadow: 0 0 12px #5af; }
+  .sub { text-align: center; opacity: .7; font-size: 13px; margin-bottom: 28px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
+  .card { display: block; text-decoration: none; color: inherit; text-align: center; padding: 22px 12px 16px;
+    border: 1px solid #2a3a6a; border-radius: 16px; background: rgba(15,20,50,.65); transition: transform .2s, box-shadow .2s;
+    cursor: pointer; }
+  .card:hover, .card:focus-visible { transform: translateY(-6px) scale(1.03); box-shadow: 0 0 24px var(--c); outline: none; border-color: var(--c); }
+  .planet { width: 96px; height: 96px; border-radius: 50%; margin: 0 auto 14px;
+    background: radial-gradient(circle at 32% 30%, #fff8, var(--c) 45%, #000a 100%);
+    box-shadow: 0 0 18px var(--c); animation: float 4s ease-in-out infinite;
+    display: flex; align-items: center; justify-content: center; font-size: 46px; line-height: 1; }
+  .card:nth-child(2) .planet { animation-delay: -1s; } .card:nth-child(3) .planet { animation-delay: -2s; } .card:nth-child(4) .planet { animation-delay: -3s; } .card:nth-child(5) .planet { animation-delay: -1.5s; }
+  @keyframes float { 50% { transform: translateY(-8px); } }
+  .name { font-size: 18px; font-weight: bold; }
+  .desc { font-size: 12px; opacity: .7; margin: 4px 0 10px; }
+  .badge { display: inline-block; min-height: 1em; font-size: 12px; padding: 3px 10px; border-radius: 999px; background: #0008; border: 1px solid var(--c); }
+  .badge:empty { visibility: hidden; }
+  .soon { opacity: .4; cursor: default; border-style: dashed; }
+  .soon:hover { transform: none; box-shadow: none; border-color: #2a3a6a; }
+  .soon .planet { background: #223; box-shadow: none; animation: none; }
+  #warp { position: fixed; inset: 0; z-index: 10; background: #fff; opacity: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="stars"></canvas>
+<main>
+  <h1>GAME STATION</h1>
+  <div class="sub">ゲームを選んでワープしよう</div>
+  <div class="grid">
+    <a class="card" href="suika/index.html" style="--c:#4a8ae0"><div class="planet">🪐</div>
+      <div class="name">Planet Merge</div><div class="desc">惑星を合体させてNovaを目指す</div><div class="badge" data-hi="suikaHi" data-fmt="BEST {v}"></div></a>
+    <a class="card" href="car/index.html" style="--c:#e0a040"><div class="planet">🚗</div>
+      <div class="name">ラインロード</div><div class="desc">線を引いて車をゴールへ</div><div class="badge" data-hi="lr_stage_best" data-fmt="STAGE {v}"></div></a>
+    <a class="card" href="space/index.html" style="--c:#c050e0"><div class="planet">🚀</div>
+      <div class="name">Space Shooter</div><div class="desc">宇宙の敵を撃ち落とせ</div><div class="badge" data-hi="spaceShooterHi" data-fmt="BEST {v}"></div></a>
+    <a class="card" href="dance/index.html" style="--c:#e05060"><div class="planet">🥁</div>
+      <div class="name">Taiko Beat</div><div class="desc">リズムに合わせて叩く</div><div class="badge" data-hi="taikoHi" data-fmt="BEST {v}"></div></a>
+    <a class="card" href="paint/index.html" style="--c:#40c8a0"><div class="planet">🎨</div>
+      <div class="name">Doodle Lab</div><div class="desc">多機能お絵描き + お題チャレンジ</div><div class="badge" data-hi="doodleDone" data-fmt="DONE {v}"></div></a>
+    <div class="card soon"><div class="planet">❔</div><div class="name">Coming Soon</div><div class="desc">次のゲームをお楽しみに</div></div>
+  </div>
+</main>
+<div id="warp"></div>
+<script>
+// ハイスコアバッジ (localStorage。値が無ければ非表示)
+document.querySelectorAll('.badge[data-hi]').forEach(function (el) {
+  try {
+    var v = +localStorage.getItem(el.dataset.hi);
+    if (v > 0) el.textContent = el.dataset.fmt.replace('{v}', v);
+  } catch (e) {}
+});
+
+// 星空
+var cv = document.getElementById('stars'), ctx = cv.getContext('2d'), stars = [], warp = 0;
+function resize() {
+  cv.width = innerWidth; cv.height = innerHeight;
+  stars = Array.from({ length: 160 }, function () { return { x: Math.random(), y: Math.random(), z: Math.random() * .8 + .2 }; });
+}
+addEventListener('resize', resize); resize();
+(function loop() {
+  ctx.fillStyle = '#05060f'; ctx.fillRect(0, 0, cv.width, cv.height);
+  var cx = cv.width / 2, cy = cv.height / 2;
+  stars.forEach(function (s) {
+    var x = s.x * cv.width, y = s.y * cv.height;
+    if (warp > 0) { // ワープ中は中心から外へ伸びる
+      var dx = x - cx, dy = y - cy, k = 1 + warp * 6 * s.z;
+      ctx.strokeStyle = 'rgba(200,220,255,' + (0.4 + s.z * .6) + ')';
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(cx + dx * k, cy + dy * k); ctx.stroke();
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,' + (0.3 + s.z * .7) + ')';
+      ctx.fillRect(x, y, s.z * 2, s.z * 2);
+      s.y += s.z * 0.0003; if (s.y > 1) s.y = 0;
+    }
+  });
+  requestAnimationFrame(loop);
+})();
+
+// ワープ遷移 (約0.5秒)
+document.querySelectorAll('a.card').forEach(function (a) {
+  a.addEventListener('click', function (e) {
+    e.preventDefault();
+    var href = a.href, w = document.getElementById('warp'), t0 = performance.now();
+    (function step(t) {
+      var p = Math.min(1, (t - t0) / 500);
+      warp = p; w.style.opacity = Math.max(0, p - .4) / .6;
+      if (p < 1) requestAnimationFrame(step); else location.href = href;
+    })(t0);
+  });
+});
+addEventListener('pageshow', function () { warp = 0; document.getElementById('warp').style.opacity = 0; });
+</script>
+</body>
+</html>
