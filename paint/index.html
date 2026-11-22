@@ -233,7 +233,7 @@ function initDoc(W, H) {
   const bg = newLayer('背景', true), l1 = newLayer('レイヤー 1');
   S.layers = [bg, l1]; S.active = l1;
   undoStack.length = 0; redoStack.length = 0; sel = null; fl = null; st = null;
-  frames.length = 0;
+  frames.forEach((f) => { f.width = f.height = 0; }); frames.length = 0;
   recordFrame();
   fitView(); layersUI(); updateButtons(); requestRender();
 }
@@ -249,13 +249,30 @@ function compositeCanvas() { const c = mk(S.W, S.H); compositeTo(c.getContext('2
 
 // ================= 履歴 (Undo/Redo) =================
 const undoStack = [], redoStack = [];
-function snap(L) { const c = mk(S.W, S.H); c.getContext('2d').drawImage(L.canvas, 0, 0); return c; }
+// レイヤーのコピー(canvas)。反転など即時利用向け。履歴には snap() を使う
+function copyCv(L) { const c = mk(S.W, S.H); c.getContext('2d').drawImage(L.canvas, 0, 0); return c; }
+// 履歴用スナップショット: 不透明画素の外接矩形だけを ImageData で保持する(canvas を大量に持たない=メモリ節約)
+function snap(L) {
+  const full = L.ctx.getImageData(0, 0, S.W, S.H), u = new Uint32Array(full.data.buffer), W = S.W, H = S.H;
+  let x0 = W, y0 = H, x1 = -1, y1 = -1;
+  for (let y = 0; y < H; y++) {
+    const row = y * W; let a = -1, b = -1;
+    for (let x = 0; x < W; x++) if (u[row + x]) { a = x; break; }
+    if (a < 0) continue;
+    for (let x = W - 1; x >= a; x--) if (u[row + x]) { b = x; break; }
+    if (a < x0) x0 = a; if (b > x1) x1 = b; if (y < y0) y0 = y; y1 = y;
+  }
+  if (x1 < 0) return { x: 0, y: 0, data: null };
+  if (x0 === 0 && y0 === 0 && x1 === W - 1 && y1 === H - 1) return { x: 0, y: 0, data: full };
+  return { x: x0, y: y0, data: L.ctx.getImageData(x0, y0, x1 - x0 + 1, y1 - y0 + 1) };
+}
+function putSnap(L, s) { L.ctx.clearRect(0, 0, S.W, S.H); if (s.data) L.ctx.putImageData(s.data, s.x, s.y); }
 function metaSnap() { return { list: S.layers.map((L) => ({ L, name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend })), active: S.active }; }
 function swapEntry(entry) { // entry を適用し、逆操作のentryを返す
   const inv = entry.map((op) => op.t === 'px' ? { t: 'px', L: op.L, img: snap(op.L) } : { t: 'meta', m: metaSnap() });
   for (let i = entry.length - 1; i >= 0; i--) {
     const op = entry[i];
-    if (op.t === 'px') { op.L.ctx.clearRect(0, 0, S.W, S.H); op.L.ctx.drawImage(op.img, 0, 0); }
+    if (op.t === 'px') putSnap(op.L, op.img);
     else {
       S.layers = op.m.list.map((x) => { Object.assign(x.L, { name: x.name, visible: x.visible, opacity: x.opacity, blend: x.blend }); return x.L; });
       S.active = S.layers.includes(op.m.active) ? op.m.active : S.layers[S.layers.length - 1];
@@ -264,7 +281,7 @@ function swapEntry(entry) { // entry を適用し、逆操作のentryを返す
   return inv;
 }
 function pushUndo(entry) {
-  undoStack.push(entry); if (undoStack.length > 40) undoStack.shift();
+  undoStack.push(entry); if (undoStack.length > 30) undoStack.shift();
   redoStack.length = 0; afterCommit();
 }
 function undo() { commitFloat(); const e = undoStack.pop(); if (!e) return; redoStack.push(swapEntry(e)); afterCommit(); }
@@ -277,12 +294,16 @@ function withMeta(fn) { const m = metaSnap(); fn(); pushUndo([{ t: 'meta', m }])
 // ================= タイムラプス記録 =================
 const frames = [];
 function recordFrame() {
-  const w = 320, h = Math.round(320 * S.H / S.W), c = mk(w, h), g = c.getContext('2d');
+  const w = 256, h = Math.round(256 * S.H / S.W), c = mk(w, h), g = c.getContext('2d');
   g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);
   g.imageSmoothingQuality = 'medium';
   g.scale(w / S.W, h / S.H); compositeTo(g);
   frames.push(c);
-  if (frames.length > 150) { const last = frames[frames.length - 1]; const th = frames.filter((_, i) => i % 2 === 0); if (th[th.length - 1] !== last) th.push(last); frames.length = 0; frames.push(...th); }
+  if (frames.length > 100) { // 1枚おきに間引く(最後の1枚は残す)。捨てるcanvasは即解放
+    const last = frames.length - 1, kept = [];
+    frames.forEach((f, i) => { if (i % 2 === 0 || i === last) kept.push(f); else f.width = f.height = 0; });
+    frames.length = 0; for (const f of kept) frames.push(f);
+  }
 }
 
 // ================= ビュー =================
@@ -640,7 +661,7 @@ function flipLayer(h) {
   if (fl) { // 浮動選択のみ反転
     const c = mk(fl.cv.width, fl.cv.height), g = c.getContext('2d'); g.translate(h ? c.width : 0, h ? 0 : c.height); g.scale(h ? -1 : 1, h ? 1 : -1); g.drawImage(fl.cv, 0, 0); fl.cv = c; requestRender(); return;
   }
-  const L = S.active, c = snap(L);
+  const L = S.active, c = copyCv(L);
   withPx(L, () => { L.ctx.save(); L.ctx.clearRect(0, 0, S.W, S.H); L.ctx.translate(h ? S.W : 0, h ? 0 : S.H); L.ctx.scale(h ? -1 : 1, h ? 1 : -1); L.ctx.drawImage(c, 0, 0); L.ctx.restore(); });
 }
 $('lFh').onclick = () => flipLayer(true); $('lFv').onclick = () => flipLayer(false);
