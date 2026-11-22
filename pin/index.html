@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Pin Flow - ピン抜きパズル</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none; background: #05060f; color: #cde; font-family: monospace; }
+  body { height: 100dvh; padding: 44px 6px 4px; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  canvas { background: #000; border: 2px solid #335; aspect-ratio: 400 / 700; height: auto;
+           width: min(100%, calc((100dvh - 44px - 30px) * 0.5714)); touch-action: none; }
+  p { margin: 4px; font-size: 11px; line-height: 1.4; opacity: .8; text-align: center; }
+  @media (max-width: 700px) { p.pc { display: none; } }
+</style>
+<script src="../assets/audio-unlock.js"></script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<p class="pc">クリック: ピンを抜く 　R: やり直し 　M: 音 　Enter: スタート/次へ</p>
+<script>
+// ======================= 基本 =======================
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = 400, H = 700, DPR = Math.min(2, window.devicePixelRatio || 1), STEP = 1 / 60;
+cv.width = W * DPR; cv.height = H * DPR;
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+const KEY_BEST = 'pinBest', KEY_CUR = 'pinCur';
+
+// ======================= 音 =======================
+let actx = null, muted = lsGet('pinMute') === '1';
+function initAudio() {
+  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (actx && actx.state === 'suspended' && actx.resume) actx.resume();
+}
+function tone(f, d, type, v, slide, delay) {
+  if (muted || !actx) return;
+  const t = actx.currentTime + (delay || 0), o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || 'sine'; o.frequency.setValueAtTime(f, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, f + slide), t + d);
+  g.gain.setValueAtTime(v || 0.07, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + d + 0.02);
+}
+function noise(d, v, f) {   // シューッ(蒸気)
+  if (muted || !actx) return;
+  const n = Math.floor(actx.sampleRate * d), buf = actx.createBuffer(1, n, actx.sampleRate), a = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) a[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const s = actx.createBufferSource(), flt = actx.createBiquadFilter(), g = actx.createGain();
+  s.buffer = buf; flt.type = 'highpass'; flt.frequency.value = f || 2000; g.gain.value = v || 0.05;
+  s.connect(flt); flt.connect(g); g.connect(actx.destination); s.start();
+}
+let lastHiss = 0, lastGem = 0;
+const sfx = {
+  pull() { tone(900, 0.08, 'square', 0.04, -500); tone(1400, 0.06, 'triangle', 0.04, 0, 0.05); },
+  hiss() { const t = performance.now(); if (t - lastHiss > 120) { lastHiss = t; noise(0.25, 0.04, 2500); } },
+  gem() { const t = performance.now(); if (t - lastGem > 60) { lastGem = t; tone(1300 + Math.random() * 600, 0.06, 'triangle', 0.03); } },
+  burn() { noise(0.15, 0.05, 600); },
+  clear() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.2, 'triangle', 0.07, 0, i * 0.09)); },
+  fail() { [392, 330, 262].forEach((f, i) => tone(f, 0.25, 'sawtooth', 0.05, -20, i * 0.15)); },
+  ui() { tone(520, 0.04, 'square', 0.03); },
+};
+
+// ======================= 描画ヘルパ =======================
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function text(s, x, y, size, col, align, bold) {
+  ctx.font = (bold === false ? '' : 'bold ') + size + 'px monospace';
+  ctx.fillStyle = col || '#cde'; ctx.textAlign = align || 'left'; ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+}
+let buttons = [];
+function btn(x, y, w, h, label, fn, o) {
+  o = o || {};
+  ctx.globalAlpha = o.disabled ? .35 : 1;
+  ctx.fillStyle = o.primary ? '#3a6ae0' : 'rgba(28,36,78,.92)'; rr(x, y, w, h, 10); ctx.fill();
+  ctx.strokeStyle = o.primary ? '#9ab8ff' : '#4a62a8'; ctx.lineWidth = 1.5; ctx.stroke();
+  text(label, x + w / 2, y + h / 2 + 1, o.size || 14, '#fff', 'center');
+  ctx.globalAlpha = 1;
+  if (!o.disabled) buttons.push({ x, y, w, h, fn });
+}
+const BG = document.createElement('canvas'); BG.width = W; BG.height = H;
+(function () {
+  const g = BG.getContext('2d'), grd = g.createLinearGradient(0, 0, 0, H);
+  grd.addColorStop(0, '#0b0c26'); grd.addColorStop(1, '#1e1238'); g.fillStyle = grd; g.fillRect(0, 0, W, H);
+  let s = 3; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 90; i++) { g.fillStyle = 'rgba(255,255,255,' + (0.2 + rnd() * .5) + ')'; g.fillRect(rnd() * W, rnd() * H, 1.3, 1.3); }
+})();
+
+// ======================= ステージ =======================
+// walls: 折れ線 [[x,y],...] / pins: [x1,y1,x2,y2] (x2,y2 側に持ち手。その向きへ抜ける)
+// fill: [種類, x, y, w, h]  種類 g=宝石 w=水 l=溶岩 / cup: [中心x, 底y, 幅, 高さ] / need: 必要な宝石の割合
+// sol: 正解の抜く順番(テスト用)
+const LEVELS = [
+  { name: 'ピンを抜こう',
+    walls: [[[140, 90], [140, 320], [175, 390]], [[260, 90], [260, 320], [225, 390]]],
+    pins: [[132, 300, 305, 300]],
+    fill: [['g', 150, 170, 100, 120]], cup: [200, 610, 160, 110], need: .7, sol: [0] },
+  { name: '水で冷やせ',
+    walls: [[[140, 80], [140, 420], [175, 480]], [[260, 80], [260, 240]], [[260, 292], [260, 420], [225, 480]],
+            [[280, 90], [280, 200]], [[365, 90], [365, 235], [262, 290]]],
+    pins: [[268, 215, 95, 215], [268, 350, 95, 350], [272, 205, 375, 205]],
+    fill: [['g', 150, 120, 100, 85], ['l', 150, 290, 100, 55], ['w', 290, 110, 70, 90]], cup: [200, 610, 160, 110], need: .7, sol: [2, 1, 0] },
+  { name: '流れを変えろ',
+    walls: [[[150, 80], [150, 290], [140, 300], [140, 450], [175, 500]], [[250, 80], [250, 280]], [[262, 405], [262, 450], [225, 500]]],
+    pins: [[142, 180, 300, 180], [142, 272, 300, 272], [145, 320, 320, 390]],
+    fill: [['g', 158, 95, 84, 78], ['l', 158, 190, 84, 75]], cup: [200, 610, 160, 110], need: .7, sol: [1, 2, 0] },
+  { name: '溶岩だまり',
+    walls: [[[150, 80], [150, 470], [180, 520]], [[260, 245], [260, 470], [220, 520]], [[150, 410], [205, 410], [205, 392]],
+            [[260, 80], [260, 210]], [[275, 90], [275, 175]], [[375, 90], [375, 205], [266, 238]]],
+    pins: [[258, 200, 100, 200], [268, 180, 385, 180]],
+    fill: [['g', 160, 100, 90, 90], ['l', 158, 380, 44, 25], ['w', 285, 95, 85, 80]], cup: [200, 620, 150, 95], need: .8, sol: [1, 0] },
+  { name: 'ぜんぶ使え',
+    walls: [[[150, 80], [150, 290], [140, 300], [140, 450], [175, 500]], [[250, 80], [250, 205]], [[262, 405], [262, 450], [225, 500]],
+            [[275, 90], [275, 185]], [[375, 90], [375, 212], [256, 248]]],
+    pins: [[248, 180, 105, 180], [248, 272, 105, 272], [268, 195, 385, 195], [145, 320, 320, 390]],
+    fill: [['g', 158, 95, 84, 78], ['l', 158, 192, 84, 72], ['w', 283, 100, 86, 82]], cup: [200, 610, 160, 110], need: .7, sol: [2, 1, 3, 0] },
+];
+const MAX_STAGE = () => LEVELS.length;
+let best = 0, stage = 1;
+function loadProgress() {
+  best = Math.min(LEVELS.length, parseInt(lsGet(KEY_BEST) || '0', 10) || 0);
+  stage = Math.max(1, Math.min(best + 1, LEVELS.length, parseInt(lsGet(KEY_CUR) || '1', 10) || 1));
+}
+
+// ======================= 粒子シミュレーション =======================
+// 位置ベース: 速度で進める → 粒子同士/壁と重ならないよう押し出す → 位置の変化から速度を求める
+const COOL_DEPTH = 8;   // 水に触れた溶岩から何段先まで連鎖して固まるか
+const PR = 5, SUB = 3, GRAV = 0.09, VMAX = 3.2, CELL = 12;
+const COLOR = { g: '#ffd23f', w: '#3d9bff', l: '#ff6a1e', s: '#8a8f9c' };
+let parts = [], segs = [], pins = [], fx = [];
+let gemTotal = 0, gemIn = 0, gemLost = 0, lavaIn = false, settleT = 0, failMsg = '';
+function capsule(x1, y1, x2, y2, r, pin) { return { x1, y1, x2, y2, r, pin }; }
+function buildLevel(lv) {
+  segs = []; parts = []; fx = []; gemIn = 0; gemLost = 0; lavaIn = false; settleT = 0; failMsg = '';
+  lv.walls.forEach(pl => { for (let i = 0; i < pl.length - 1; i++) segs.push(capsule(pl[i][0], pl[i][1], pl[i + 1][0], pl[i + 1][1], 6)); });
+  const [cx, by, cw, ch] = lv.cup, l = cx - cw / 2, r = cx + cw / 2, t = by - ch;
+  segs.push(capsule(l, t, l + 6, by, 6), capsule(l + 6, by, r - 6, by, 6), capsule(r - 6, by, r, t, 6));
+  pins = lv.pins.map((p, i) => ({ id: i, x1: p[0], y1: p[1], x2: p[2], y2: p[3], r: 5, pulled: false, off: 0 }));
+  lv.fill.forEach(([k, x, y, w, h]) => {
+    const sp = 10.5;
+    for (let yy = y + PR; yy <= y + h - PR; yy += sp * .9) {
+      const odd = Math.round((yy - y) / (sp * .9)) % 2;
+      for (let xx = x + PR + (odd ? sp / 2 : 0); xx <= x + w - PR; xx += sp) parts.push({ x: xx, y: yy, px: xx, py: yy, k, dead: false });
+    }
+  });
+  gemTotal = parts.filter(p => p.k === 'g').length;
+}
+function cupBox() { const [cx, by, cw, ch] = L().cup; return { l: cx - cw / 2 + 6, r: cx + cw / 2 - 6, t: by - ch, b: by }; }
+let grid = new Map();
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i], key = Math.floor(p.x / CELL) * 1000 + Math.floor(p.y / CELL);
+    let a = grid.get(key); if (!a) grid.set(key, a = []); a.push(i);
+  }
+}
+function collideSeg(p, s) {
+  const dx = s.x2 - s.x1, dy = s.y2 - s.y1, L2 = dx * dx + dy * dy;
+  let t = L2 ? ((p.x - s.x1) * dx + (p.y - s.y1) * dy) / L2 : 0; t = t < 0 ? 0 : t > 1 ? 1 : t;
+  const cx = s.x1 + dx * t, cy = s.y1 + dy * t, ex = p.x - cx, ey = p.y - cy, d2 = ex * ex + ey * ey, m = PR + s.r;
+  if (d2 >= m * m) return false;
+  const d = Math.sqrt(d2) || 0.001, push = m - d;
+  p.x += ex / d * push; p.y += ey / d * push;
+  return true;
+}
+function react(a, b) {   // 触れ合った粒子の反応
+  const k = a.k + b.k;
+  if (k === 'wl' || k === 'lw') {
+    const lava = a.k === 'l' ? a : b, water = a.k === 'w' ? a : b;
+    lava.k = 's'; lava.chg = COOL_DEPTH; lava.cd = 5; water.dead = true; sfx.hiss();
+    fx.push({ x: water.x, y: water.y, t: 0, type: 'steam' });
+  } else if (k === 'sl' || k === 'ls') {
+    // 冷えたばかりの石は、触れている溶岩も少し遅れて石にする(内側の溶岩まで固まる)
+    const st = a.k === 's' ? a : b, lava = a.k === 'l' ? a : b;
+    if (st.chg > 0 && st.cd <= 0) { lava.k = 's'; lava.chg = st.chg - 1; lava.cd = 5; if (Math.random() < .3) fx.push({ x: lava.x, y: lava.y, t: 0, type: 'steam' }); }
+  } else if (k === 'gl' || k === 'lg') {
+    const gem = a.k === 'g' ? a : b; gem.dead = true; gemLost++; sfx.burn();
+    fx.push({ x: gem.x, y: gem.y, t: 0, type: 'burn' });
+  }
+}
+function simStep() {
+  const activeSegs = segs.concat(pins.filter(p => !p.pulled));
+  for (const p of parts) if (p.cd > 0) p.cd--;
+  for (let s = 0; s < SUB; s++) {
+    for (const p of parts) {
+      let vx = (p.x - p.px) * .995, vy = (p.y - p.py) * .995 + GRAV;
+      if (p.k === 'l') { vx *= .985; vy *= .99; }     // 溶岩は少しねばる
+      const sp = Math.hypot(vx, vy); if (sp > VMAX) { vx *= VMAX / sp; vy *= VMAX / sp; }
+      p.px = p.x; p.py = p.y; p.x += vx; p.y += vy;
+    }
+    for (let it = 0; it < 2; it++) {
+      rebuildGrid();
+      for (let i = 0; i < parts.length; i++) {
+        const p = parts[i]; if (p.dead) continue;
+        const gx = Math.floor(p.x / CELL), gy = Math.floor(p.y / CELL);
+        for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+          const a = grid.get((gx + ox) * 1000 + gy + oy); if (!a) continue;
+          for (const j of a) {
+            if (j <= i) continue;
+            const q = parts[j]; if (q.dead) continue;
+            let dx = q.x - p.x, dy = q.y - p.y, d2 = dx * dx + dy * dy;
+            if (d2 >= 4 * PR * PR) continue;
+            if (p.k !== q.k && it === 0) { react(p, q); if (p.dead || q.dead) continue; }
+            if (d2 < 1e-6) { dx = Math.random() - .5; dy = -.5; d2 = dx * dx + dy * dy; }
+            const d = Math.sqrt(d2), push = (2 * PR - d) * .5, nx = dx / d, ny = dy / d;
+            p.x -= nx * push; p.y -= ny * push; q.x += nx * push; q.y += ny * push;
+          }
+        }
+      }
+      for (const p of parts) {
+        if (p.dead) continue;
+        for (const sg of activeSegs) {
+          if (collideSeg(p, sg) && it === 1) {   // 壁に触れたら少し摩擦
+            p.px = p.x - (p.x - p.px) * .9; p.py = p.y - (p.y - p.py) * .9;
+          }
+        }
+      }
+    }
+    if (parts.some(p => p.dead)) parts = parts.filter(p => !p.dead);
+  }
+  // 画面外 → 消える
+  const c = cupBox();
+  let inCup = 0;
+  parts = parts.filter(p => {
+    if (p.y > H + 20 || p.x < -20 || p.x > W + 20) { if (p.k === 'g') gemLost++; return false; }
+    const ins = p.x > c.l - 2 && p.x < c.r + 2 && p.y > c.t + 4 && p.y < c.b;
+    if (ins && p.k === 'g') inCup++;
+    if (ins && p.k === 'l') lavaIn = true;
+    return true;
+  });
+  if (inCup > gemIn) sfx.gem();
+  gemIn = inCup;
+}
+
+// ======================= 状態 =======================
+let state = 'title';   // title / play / clear / fail
+let clearT = 0;
+const L = () => LEVELS[stage - 1];
+function start() { initAudio(); buildLevel(L()); state = 'play'; lsSet(KEY_CUR, String(stage)); }
+function retry() { buildLevel(L()); state = 'play'; sfx.ui(); }
+function nextStage() { if (stage < LEVELS.length) { stage++; start(); } }
+function pullPin(pn) {
+  if (state !== 'play' || pn.pulled) return;
+  pn.pulled = true; sfx.pull();
+}
+function judge() {
+  const need = Math.ceil(gemTotal * L().need);
+  if (lavaIn) { lose('溶岩がカップに入っちゃった!'); return; }
+  if (gemTotal - gemLost < need) { lose('宝石が足りなくなった…'); return; }
+  // 積み重なった粒子は少し震え続けるので、「速く動いている粒子がほぼ無い」で静止とみなす
+  let mv = 0; for (const p of parts) if (Math.abs(p.x - p.px) + Math.abs(p.y - p.py) > .15) mv++;
+  const moving = mv > Math.max(2, parts.length * .02);
+  settleT = moving ? 0 : settleT + 1;
+  if (gemIn >= need && settleT > 30) { win(); return; }
+  if (pins.every(p => p.pulled) && settleT > 50) lose('カップに入った宝石が足りない…');
+}
+function win() { state = 'clear'; clearT = 0; sfx.clear(); if (stage > best) { best = stage; lsSet(KEY_BEST, String(best)); } }
+function lose(m) { state = 'fail'; clearT = 0; failMsg = m; sfx.fail(); }
+const stars = () => { const r = gemIn / gemTotal; return r >= .9 ? 3 : r >= .8 ? 2 : 1; };
+
+// ======================= 更新 =======================
+function update() {
+  pins.forEach(p => { if (p.pulled && p.off < 1) p.off = Math.min(1, p.off + STEP * 2.5); });
+  if (state === 'play' || state === 'clear' || state === 'fail') simStep();
+  if (state === 'play') judge();
+  fx.forEach(f => f.t++); fx = fx.filter(f => f.t < 30);
+  if (state === 'clear' || state === 'fail') clearT++;
+}
+
+// ======================= 描画 =======================
+function drawSeg(s, col, w) {
+  ctx.strokeStyle = col; ctx.lineWidth = w; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); ctx.stroke();
+}
+function drawPin(p) {
+  const dx = p.x2 - p.x1, dy = p.y2 - p.y1, len = Math.hypot(dx, dy), ux = dx / len, uy = dy / len;
+  const o = p.off * (len + 40), e = p.off;
+  ctx.globalAlpha = 1 - e * e;
+  const s = { x1: p.x1 + ux * o, y1: p.y1 + uy * o, x2: p.x2 + ux * o, y2: p.y2 + uy * o };
+  drawSeg(s, '#6b4a10', 12); drawSeg(s, '#ffc94a', 8);
+  ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(s.x1 - uy * 2, s.y1 + ux * 2 - 1); ctx.lineTo(s.x2 - uy * 2, s.y2 + ux * 2 - 1); ctx.stroke();
+  // 持ち手(リング)
+  const hx = s.x2 + ux * 10, hy = s.y2 + uy * 10;
+  ctx.strokeStyle = '#6b4a10'; ctx.lineWidth = 9; ctx.beginPath(); ctx.arc(hx, hy, 11, 0, 7); ctx.stroke();
+  ctx.strokeStyle = '#ffc94a'; ctx.lineWidth = 5; ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+function drawParticles() {
+  const tm = Date.now() / 200;
+  // 水・溶岩: 少し大きめの円を重ねて液体っぽく
+  ctx.fillStyle = 'rgba(61,155,255,.9)';
+  ctx.beginPath(); parts.forEach(p => { if (p.k === 'w') { ctx.moveTo(p.x + PR + 2, p.y); ctx.arc(p.x, p.y, PR + 2, 0, 7); } }); ctx.fill();
+  ctx.fillStyle = '#ff6a1e';
+  ctx.beginPath(); parts.forEach(p => { if (p.k === 'l') { ctx.moveTo(p.x + PR + 2, p.y); ctx.arc(p.x, p.y, PR + 2, 0, 7); } }); ctx.fill();
+  ctx.fillStyle = 'rgba(255,220,80,.55)';
+  ctx.beginPath(); parts.forEach((p, i) => { if (p.k === 'l' && (i + Math.floor(tm)) % 5 === 0) { ctx.moveTo(p.x + 2.5, p.y); ctx.arc(p.x, p.y, 2.5, 0, 7); } }); ctx.fill();
+  ctx.fillStyle = '#7d828f';
+  ctx.beginPath(); parts.forEach(p => { if (p.k === 's') { ctx.moveTo(p.x + PR + .5, p.y); ctx.arc(p.x, p.y, PR + .5, 0, 7); } }); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.18)';
+  ctx.beginPath(); parts.forEach(p => { if (p.k === 's') { ctx.moveTo(p.x, p.y - 2); ctx.arc(p.x - 1.5, p.y - 2, 1.5, 0, 7); } }); ctx.fill();
+  // 宝石: ひし形
+  parts.forEach(p => {
+    if (p.k !== 'g') return;
+    ctx.fillStyle = '#ffd23f'; ctx.beginPath(); ctx.moveTo(p.x, p.y - 6); ctx.lineTo(p.x + 5.5, p.y); ctx.lineTo(p.x, p.y + 6); ctx.lineTo(p.x - 5.5, p.y); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#fff6c0'; ctx.beginPath(); ctx.moveTo(p.x, p.y - 6); ctx.lineTo(p.x + 2.5, p.y - 1); ctx.lineTo(p.x - 2.5, p.y - 1); ctx.closePath(); ctx.fill();
+  });
+  fx.forEach(f => {
+    ctx.globalAlpha = 1 - f.t / 30;
+    ctx.fillStyle = f.type === 'steam' ? '#e8f0ff' : '#ffb070';
+    ctx.beginPath(); ctx.arc(f.x + Math.sin(f.t / 3) * 3, f.y - f.t * .8, 3 + f.t * .25, 0, 7); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  buttons = [];
+  ctx.drawImage(BG, 0, 0);
+  if (state !== 'title') {
+    const lv = L(), c = cupBox();
+    // カップ(宇宙人の器)
+    ctx.fillStyle = 'rgba(120,255,170,.08)'; ctx.fillRect(c.l, c.t, c.r - c.l, c.b - c.t);
+    drawParticles();
+    segs.forEach(s => drawSeg(s, '#1c2244', 14));
+    segs.forEach(s => drawSeg(s, '#5a6aa8', 10));
+    segs.forEach(s => { ctx.globalAlpha = .35; drawSeg({ x1: s.x1, y1: s.y1 - 2, x2: s.x2, y2: s.y2 - 2 }, '#c8d4ff', 2); ctx.globalAlpha = 1; });
+    pins.forEach(p => { if (p.off < 1) drawPin(p); });
+    const need = Math.ceil(gemTotal * lv.need), mood = state === 'fail' ? '😵' : gemIn >= need ? '🤩' : gemIn > 0 ? '😋' : '👽';
+    text(mood, (c.l + c.r) / 2, c.b + 14 > 622 ? c.t - 18 : c.b + 14, 22, '#fff', 'center', false);
+    text('💎 ' + gemIn + ' / ' + need, (c.l + c.r) / 2, c.t - 40 < 60 ? c.t + 14 : c.t - (c.b + 14 > 622 ? 40 : 14), 13, gemIn >= need ? '#9dffb8' : '#ffe27a', 'center');
+    const by = 636, bh = 50;
+    btn(8, by, 120, bh, '↻ やり直し', retry, { size: 14 });
+    text(lv.name, 260, by + 25, 13, '#9ab', 'center', false);
+  }
+  ctx.fillStyle = 'rgba(8,10,30,.85)'; ctx.fillRect(0, 0, W, 50);
+  text('STAGE ' + stage + ' / ' + LEVELS.length, W / 2, 18, 18, '#fff', 'center');
+  if (state !== 'title') text('宝石を ' + Math.round(L().need * 100) + '% 以上カップへ!溶岩は入れちゃダメ', W / 2, 38, 11, '#9ab', 'center', false);
+  text('BEST ' + best, 10, 25, 11, '#9ab', 'left', false);
+  btn(W - 46, 8, 38, 34, muted ? '🔇' : '🔊', () => { muted = !muted; lsSet('pinMute', muted ? '1' : '0'); }, { size: 16 });
+
+  if (state === 'title') {
+    panel('PIN FLOW', ['ピンをタップして抜こう!', '', '💎 宝石を下のカップに集めればクリア', '🔥 溶岩がカップに入ったら失敗', '🔥 溶岩に触れた宝石は燃えてしまう', '💧 水を溶岩にかけると石になる', '抜く順番をよく考えよう']);
+    btn(40, 470, 54, 54, '◀', () => { if (stage > 1) { stage--; sfx.ui(); } }, { size: 20, disabled: stage <= 1 });
+    text('STAGE ' + stage, 147, 497, 16, '#fff', 'center');
+    btn(200, 470, 54, 54, '▶', () => { if (stage < Math.min(LEVELS.length, best + 1)) { stage++; sfx.ui(); } }, { size: 20, disabled: stage >= Math.min(LEVELS.length, best + 1) });
+    btn(266, 462, 110, 70, 'START', start, { primary: true, size: 20 });
+  } else if (state === 'clear' && clearT > 50) {
+    const st = stars();
+    panel('CLEAR!', ['STAGE ' + stage + '  宝石 ' + gemIn + ' / ' + gemTotal]);
+    text('★'.repeat(st) + '☆'.repeat(3 - st), W / 2, 330, 40, '#ffd23f', 'center');
+    btn(40, 430, 140, 56, 'もう一度', retry);
+    if (stage < LEVELS.length) btn(220, 430, 140, 56, '次へ ▶', nextStage, { primary: true, size: 18 });
+    else text('全ステージクリア!', 290, 458, 14, '#9dffb8', 'center');
+  } else if (state === 'fail' && clearT > 40) {
+    panel('しっぱい…', [failMsg, '', '抜く順番を変えてみよう']);
+    btn(220, 430, 140, 56, '↻ やり直し', retry, { primary: true, size: 18 });
+  }
+}
+function panel(title, lines) {
+  ctx.fillStyle = 'rgba(5,6,15,.82)'; ctx.fillRect(0, 50, W, 575);
+  text(title, W / 2, 180, 38, '#ffe27a', 'center');
+  lines.forEach((l, i) => text(l, W / 2, 240 + i * 26, 13, '#cde', 'center', false));
+}
+
+// ======================= 入力 =======================
+function pos(e) { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height }; }
+function pinDist(pn, p) {
+  const dx = pn.x2 - pn.x1, dy = pn.y2 - pn.y1, L2 = dx * dx + dy * dy, len = Math.sqrt(L2);
+  const hx = pn.x2 + dx / len * 10, hy = pn.y2 + dy / len * 10;   // 持ち手も含める
+  let t = ((p.x - pn.x1) * dx + (p.y - pn.y1) * dy) / L2; t = Math.max(0, Math.min(1, t));
+  return Math.min(Math.hypot(p.x - pn.x1 - dx * t, p.y - pn.y1 - dy * t), Math.hypot(p.x - hx, p.y - hy));
+}
+cv.addEventListener('pointerdown', e => {
+  initAudio();
+  const p = pos(e);
+  for (let i = buttons.length - 1; i >= 0; i--) { const b = buttons[i]; if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) { b.fn(); return; } }
+  if (state !== 'play') return;
+  let bestP = null, bd = 22;
+  pins.forEach(pn => { if (pn.pulled) return; const d = pinDist(pn, p); if (d < bd) { bd = d; bestP = pn; } });
+  if (bestP) pullPin(bestP);
+});
+addEventListener('keydown', e => {
+  initAudio();
+  const k = e.key.toLowerCase();
+  if (k === 'enter') { if (state === 'title') start(); else if (state === 'clear') nextStage(); else if (state === 'fail') retry(); }
+  else if (k === 'r' && state !== 'title') retry();
+  else if (k === 'm') { muted = !muted; lsSet('pinMute', muted ? '1' : '0'); }
+});
+
+// ======================= ループ =======================
+loadProgress();
+let last = 0, acc = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  acc += Math.min(.1, (t - last) / 1000); last = t;
+  let n = 0;
+  while (acc >= STEP && n < 4) { update(); acc -= STEP; n++; }
+  if (n === 4) acc = 0;
+  draw();
+}
+requestAnimationFrame(t => { last = t; frame(t); });
+// テスト用: order の順にピンを抜き、結果を返す(gap: 抜く間隔フレーム)
+window.__game = {
+  LEVELS, get state() { return state; },
+  run(i, order, gap) { return this.runTo(i, order, 60 * 30, gap); },
+  runTo(i, order, frames, gap) {
+    stage = i; buildLevel(L()); state = 'play';
+    const seq = (order || L().sol).slice(); let t = 0;
+    for (let k = 0; k < frames && state === 'play'; k++) {
+      if (seq.length && t-- <= 0) { pullPin(pins[seq.shift()]); t = gap || 120; }
+      update();
+    }
+    return { state, gemIn, gemTotal, gemLost, need: Math.ceil(gemTotal * L().need), lavaIn, failMsg, n: parts.length };
+  },
+};
+</script>
+<script src="../assets/back-button.js"></script>
+</body>
+</html>

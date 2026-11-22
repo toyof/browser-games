@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Parking Out - 駐車場脱出パズル</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none; background: #05060f; color: #cde; font-family: monospace; }
+  body { height: 100dvh; padding: 44px 6px 4px; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  canvas { background: #000; border: 2px solid #335; aspect-ratio: 400 / 700; height: auto;
+           width: min(100%, calc((100dvh - 44px - 30px) * 0.5714)); touch-action: none; }
+  p { margin: 4px; font-size: 11px; line-height: 1.4; opacity: .8; text-align: center; }
+  @media (max-width: 700px) { p.pc { display: none; } }
+</style>
+<script src="../assets/audio-unlock.js"></script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<p class="pc">クリック: 車を前進 　ドラッグ: ドラッグした向きへ走らせる 　R: やり直し 　H: ヒント 　M: 音 　Enter: スタート/次へ</p>
+<script>
+// ======================= 基本 =======================
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = 400, H = 700, DPR = Math.min(2, window.devicePixelRatio || 1), STEP = 1 / 60;
+cv.width = W * DPR; cv.height = H * DPR;
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+const KEY_BEST = 'parkingBest', KEY_CUR = 'parkingCur', MAX_STAGE = 99;
+let best = parseInt(lsGet(KEY_BEST) || '0', 10) || 0;
+let stage = Math.max(1, Math.min(best + 1, parseInt(lsGet(KEY_CUR) || '1', 10) || 1));
+
+// ======================= 音 =======================
+let actx = null, muted = lsGet('parkingMute') === '1';
+function initAudio() {
+  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (actx && actx.state === 'suspended' && actx.resume) actx.resume();
+}
+function tone(f, d, type, v, slide, delay) {
+  if (muted || !actx) return;
+  const t = actx.currentTime + (delay || 0), o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || 'sine'; o.frequency.setValueAtTime(f, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, f + slide), t + d);
+  g.gain.setValueAtTime(v || 0.07, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + d + 0.02);
+}
+const sfx = {
+  go() { tone(110, 0.35, 'sawtooth', 0.04, 140); tone(220, 0.3, 'square', 0.02, 200); },
+  exit() { tone(523, 0.1, 'triangle', 0.06); tone(784, 0.14, 'triangle', 0.06, 0, 0.08); },
+  bump() { tone(90, 0.15, 'square', 0.07, -30); },
+  horn() { tone(440, 0.18, 'square', 0.035); tone(554, 0.18, 'square', 0.035); tone(440, 0.18, 'square', 0.035, 0, 0.22); tone(554, 0.18, 'square', 0.035, 0, 0.22); },
+  clear() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.2, 'triangle', 0.07, 0, i * 0.09)); },
+  ui() { tone(520, 0.04, 'square', 0.03); },
+};
+
+// ======================= 描画ヘルパ =======================
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function text(s, x, y, size, col, align, bold) {
+  ctx.font = (bold === false ? '' : 'bold ') + size + 'px monospace';
+  ctx.fillStyle = col || '#cde'; ctx.textAlign = align || 'left'; ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+}
+let buttons = [];
+function btn(x, y, w, h, label, fn, o) {
+  o = o || {};
+  ctx.globalAlpha = o.disabled ? .35 : 1;
+  ctx.fillStyle = o.primary ? '#3a6ae0' : 'rgba(28,36,78,.92)'; rr(x, y, w, h, 10); ctx.fill();
+  ctx.strokeStyle = o.primary ? '#9ab8ff' : '#4a62a8'; ctx.lineWidth = 1.5; ctx.stroke();
+  text(label, x + w / 2, y + h / 2 + 1, o.size || 14, '#fff', 'center');
+  ctx.globalAlpha = 1;
+  if (!o.disabled) buttons.push({ x, y, w, h, fn });
+}
+function rng(seed) {
+  return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+
+// ======================= ステージ生成 =======================
+// 車: { id, x, y, len, h(横向き), f(前方: +1 = 右/下, -1 = 左/上), col }
+const COLS = ['#ff5a5a', '#3d8bff', '#ffd23f', '#4fd65a', '#b15cff', '#ff9a2e', '#2fe0d0', '#ff6fc0', '#e8ecf4', '#5a6a8a'];
+const sizeOf = s => ({ C: Math.min(8, 5 + Math.floor(s / 4)), R: Math.min(10, 6 + Math.floor(s / 3)) });
+function cellsOf(c) { const o = []; for (let k = 0; k < c.len; k++) o.push(c.h ? [c.x + k, c.y] : [c.x, c.y + k]); return o; }
+// 向き d(+1/-1)に進んだときの経路。最初にぶつかる位置まで進めるマス数と、外へ出られるか
+function probe(g, C, R, c, d) {
+  let n = 0;
+  for (;;) {
+    let x, y;
+    if (c.h) { x = d > 0 ? c.x + c.len + n : c.x - 1 - n; y = c.y; } else { x = c.x; y = d > 0 ? c.y + c.len + n : c.y - 1 - n; }
+    if (x < 0 || y < 0 || x >= C || y >= R) return { free: true, n };
+    if (g[y][x] !== null) return { free: false, n, hit: g[y][x] };
+    n++;
+  }
+}
+function genStage(s) {
+  const r = rng(s * 104729 + 5), { C, R } = sizeOf(s);
+  const nObs = s < 3 ? 0 : Math.min(6, Math.floor(s / 3)), truckP = Math.min(.35, .05 + s * .02);
+  let bestSet = null, bestScore = -1;
+  for (let tries = 0; tries < 30; tries++) {
+    const g = Array.from({ length: R }, () => new Array(C).fill(null)), obs = [], cars = [];
+    for (let i = 0; i < nObs; i++) {
+      const x = 1 + Math.floor(r() * (C - 2)), y = 1 + Math.floor(r() * (R - 2));
+      if (g[y][x] === null) { g[y][x] = 'o'; obs.push([x, y]); }
+    }
+    // 逆順に置いていく: 置いた時点で外へ出られる車だけを置けば、必ず全台出せる配置になる
+    for (let a = 0; a < C * R * 40; a++) {
+      const len = r() < truckP ? 3 : 2, h = r() < .5;
+      const x = Math.floor(r() * (h ? C - len + 1 : C)), y = Math.floor(r() * (h ? R : R - len + 1));
+      const c = { id: cars.length, x, y, len, h, f: r() < .5 ? 1 : -1, col: COLS[Math.floor(r() * COLS.length)] };
+      if (cellsOf(c).some(([cx, cy]) => g[cy][cx] !== null)) continue;
+      if (!probe(g, C, R, c, 1).free && !probe(g, C, R, c, -1).free) continue;
+      cellsOf(c).forEach(([cx, cy]) => g[cy][cx] = c.id); cars.push(c);
+    }
+    // 難しさの目安: 最初は両方向とも塞がれている車の数
+    const blocked = cars.filter(c => !probe(g, C, R, c, 1).free && !probe(g, C, R, c, -1).free).length;
+    const score = cars.length + blocked * 2;
+    if (score > bestScore) { bestScore = score; bestSet = { C, R, obs, cars }; }
+  }
+  return bestSet;
+}
+
+// ======================= 状態 =======================
+let state = 'title';     // title / play / clear
+let C = 5, R = 6, CS = 50, OX = 0, OY = 0, grid = [], cars = [], obs = [], movers = [], bumps = 0, total = 0;
+let clearT = 0, hint = null, parts = [], drag = null;
+function loadStage() {
+  const d = genStage(stage);
+  C = d.C; R = d.R; obs = d.obs; cars = d.cars.map(c => Object.assign({}, c, { gone: false })); total = cars.length;
+  CS = Math.floor(Math.min((W - 60) / C, 520 / R));
+  OX = Math.round((W - CS * C) / 2); OY = Math.round(78 + (520 - CS * R) / 2);
+  rebuild(); movers = []; bumps = 0; hint = null; parts = []; drag = null;
+  lsSet(KEY_CUR, String(stage));
+}
+function rebuild() {
+  grid = Array.from({ length: R }, () => new Array(C).fill(null));
+  obs.forEach(([x, y]) => grid[y][x] = 'o');
+  cars.forEach(c => { if (!c.gone) cellsOf(c).forEach(([x, y]) => grid[y][x] = c.id); });
+}
+function start() { initAudio(); loadStage(); state = 'play'; }
+function retry() { loadStage(); state = 'play'; sfx.ui(); }
+function nextStage() { stage = Math.min(MAX_STAGE, stage + 1); start(); }
+const remaining = () => cars.filter(c => !c.gone).length;
+
+// ======================= 操作 =======================
+function drive(c, d) {
+  if (c.gone || movers.some(m => m.c === c)) return;
+  hint = null;
+  const p = probe(grid, C, R, c, d);
+  if (p.free) {   // 出庫: 論理上はすぐ盤面から消す(他の車をすぐ動かせる)
+    c.gone = true; rebuild();
+    movers.push({ c, d, off: 0, v: 0, kind: 'exit' });
+    sfx.go();
+  } else {
+    movers.push({ c, d, off: 0, v: 0, kind: 'bump', to: p.n, phase: 0, hit: p.hit });
+    sfx.go();
+  }
+}
+function showHint() {
+  if (state !== 'play') return;
+  for (const c of cars) {
+    if (c.gone) continue;
+    for (const d of [c.f, -c.f]) if (probe(grid, C, R, c, d).free) { hint = { c, d }; sfx.ui(); return; }
+  }
+}
+
+// ======================= 更新 =======================
+const SPEED = 16;   // マス/秒
+function update() {
+  for (const m of movers) {
+    if (m.kind === 'exit') {
+      m.v = Math.min(SPEED * 1.6, m.v + 40 * STEP); m.off += m.v * STEP;
+      if (m.off > Math.max(C, R) + 6) m.done = true;
+    } else if (m.phase === 0) {      // 前の車まで進む
+      m.v = Math.min(SPEED, m.v + 60 * STEP); m.off += m.v * STEP;
+      if (m.off >= m.to) {
+        m.off = m.to; m.phase = 1; m.t = 0; bumps++; sfx.bump(); if (Math.random() < .5) sfx.horn();
+        const [hx, hy] = cellsOf(m.c)[m.d > 0 ? m.c.len - 1 : 0];
+        const px = OX + (hx + .5 + (m.c.h ? m.d * (m.off + .5) : 0)) * CS, py = OY + (hy + .5 + (!m.c.h ? m.d * (m.off + .5) : 0)) * CS;
+        for (let k = 0; k < 10; k++) { const a = Math.random() * 7, v = 1 + Math.random() * 2; parts.push({ x: px, y: py, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 22, col: '#ffe27a' }); }
+        const hc = cars[m.hit]; if (hc && typeof m.hit === 'number') hc.shake = 0.3;
+      }
+    } else if (m.phase === 1) {      // ぶつかって元の位置へ戻る
+      m.t += STEP;
+      if (m.t > .12) { m.off = Math.max(0, m.off - SPEED * .8 * STEP); if (m.off <= 0) m.done = true; }
+    }
+  }
+  movers = movers.filter(m => !m.done);
+  cars.forEach(c => { if (c.shake) c.shake = Math.max(0, c.shake - STEP); });
+  parts.forEach(p => { p.x += p.vx; p.y += p.vy; p.life--; }); parts = parts.filter(p => p.life > 0);
+  if (state === 'play' && remaining() === 0 && !movers.length) {
+    state = 'clear'; clearT = 0; sfx.clear();
+    if (stage > best) { best = stage; lsSet(KEY_BEST, String(best)); }
+  }
+  if (state === 'clear') clearT++;
+}
+
+// ======================= 描画 =======================
+function drawCar(c, off) {
+  const L = c.len * CS, w = CS * .74, pad = CS * .08;
+  let cx = OX + (c.x + (c.h ? c.len / 2 : .5)) * CS, cy = OY + (c.y + (c.h ? .5 : c.len / 2)) * CS;
+  if (off) { if (c.h) cx += off * CS; else cy += off * CS; }
+  if (c.shake) { const k = Math.sin(c.shake * 80) * 2.5; if (c.h) cy += k; else cx += k; }
+  ctx.save(); ctx.translate(cx, cy);
+  ctx.rotate(c.h ? (c.f > 0 ? 0 : Math.PI) : (c.f > 0 ? Math.PI / 2 : -Math.PI / 2));   // 前方 = +x
+  const l = L - pad * 2;
+  ctx.fillStyle = 'rgba(0,0,0,.35)'; rr(-l / 2 + 2, -w / 2 + 3, l, w, CS * .18); ctx.fill();
+  ctx.fillStyle = c.col; rr(-l / 2, -w / 2, l, w, CS * .18); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 1.5; ctx.stroke();
+  if (c.len === 3) {   // トラック: 荷台 + 運転席
+    ctx.fillStyle = 'rgba(255,255,255,.25)'; rr(-l / 2 + 4, -w / 2 + 4, l * .62, w - 8, 4); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,.25)'; for (let k = 1; k < 4; k++) { const x = -l / 2 + 4 + l * .62 * k / 4; ctx.beginPath(); ctx.moveTo(x, -w / 2 + 6); ctx.lineTo(x, w / 2 - 6); ctx.stroke(); }
+    ctx.fillStyle = '#1b2a44'; rr(l / 2 - l * .22, -w / 2 + 5, l * .12, w - 10, 3); ctx.fill();
+  } else {
+    ctx.fillStyle = '#1b2a44'; rr(l * .08, -w / 2 + 5, l * .2, w - 10, 4); ctx.fill();      // フロントガラス
+    ctx.fillStyle = '#1b2a44cc'; rr(-l / 2 + l * .1, -w / 2 + 6, l * .14, w - 12, 3); ctx.fill(); // リアガラス
+    ctx.fillStyle = 'rgba(255,255,255,.2)'; rr(-l * .2, -w / 2 + 5, l * .26, w - 10, 4); ctx.fill(); // 屋根
+  }
+  ctx.fillStyle = '#fff6b0'; ctx.fillRect(l / 2 - 4, -w / 2 + 3, 3, 6); ctx.fillRect(l / 2 - 4, w / 2 - 9, 3, 6);    // ヘッドライト
+  ctx.fillStyle = '#ff3a3a'; ctx.fillRect(-l / 2 + 1, -w / 2 + 3, 2.5, 5); ctx.fillRect(-l / 2 + 1, w / 2 - 8, 2.5, 5);
+  ctx.restore();
+}
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  buttons = [];
+  // 背景(芝生 + 道路)
+  ctx.fillStyle = '#1b3a2a'; ctx.fillRect(0, 0, W, H);
+  if (state !== 'title') {
+    const rw = 22;
+    ctx.fillStyle = '#3a3f4c'; rr(OX - rw, OY - rw, C * CS + rw * 2, R * CS + rw * 2, 18); ctx.fill();
+    ctx.strokeStyle = '#d8d8a0'; ctx.setLineDash([8, 8]); ctx.lineWidth = 1.5;
+    rr(OX - rw / 2, OY - rw / 2, C * CS + rw, R * CS + rw, 12); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = '#4a505e'; ctx.fillRect(OX, OY, C * CS, R * CS);
+    ctx.strokeStyle = 'rgba(255,255,255,.18)'; ctx.lineWidth = 1;
+    for (let x = 0; x <= C; x++) { ctx.beginPath(); ctx.moveTo(OX + x * CS, OY); ctx.lineTo(OX + x * CS, OY + R * CS); ctx.stroke(); }
+    for (let y = 0; y <= R; y++) { ctx.beginPath(); ctx.moveTo(OX, OY + y * CS); ctx.lineTo(OX + C * CS, OY + y * CS); ctx.stroke(); }
+    obs.forEach(([x, y]) => {   // パイロン
+      const px = OX + (x + .5) * CS, py = OY + (y + .5) * CS;
+      ctx.fillStyle = '#222'; rr(px - CS * .3, py - CS * .3, CS * .6, CS * .6, 4); ctx.fill();
+      ctx.fillStyle = '#ff8a1e'; ctx.beginPath(); ctx.arc(px, py, CS * .22, 0, 7); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(px, py, CS * .1, 0, 7); ctx.fill();
+    });
+    const moving = new Map(movers.map(m => [m.c, m]));
+    cars.forEach(c => { if (!c.gone && !moving.has(c)) drawCar(c, 0); });
+    movers.forEach(m => { if (m.kind === 'exit') ctx.globalAlpha = Math.max(0, Math.min(1, (Math.max(C, R) + 6 - m.off) / 3)); drawCar(m.c, m.d * m.off); ctx.globalAlpha = 1; });
+    if (hint && !hint.c.gone) {
+      const c = hint.c, [x, y] = cellsOf(c)[hint.d > 0 ? c.len - 1 : 0];
+      const px = OX + (x + .5) * CS + (c.h ? hint.d * CS * .75 : 0), py = OY + (y + .5) * CS + (!c.h ? hint.d * CS * .75 : 0);
+      const a = Math.sin(Date.now() / 120) * 4;
+      ctx.save(); ctx.translate(px + (c.h ? hint.d * a : 0), py + (!c.h ? hint.d * a : 0)); ctx.rotate(c.h ? (hint.d > 0 ? 0 : Math.PI) : (hint.d > 0 ? Math.PI / 2 : -Math.PI / 2));
+      ctx.fillStyle = '#ffe27a'; ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-6, -12); ctx.lineTo(-6, 12); ctx.closePath(); ctx.fill(); ctx.restore();
+    }
+    parts.forEach(p => { ctx.globalAlpha = p.life / 22; ctx.fillStyle = p.col; ctx.fillRect(p.x - 2, p.y - 2, 4, 4); });
+    ctx.globalAlpha = 1;
+    const by = 636, bh = 50;
+    btn(8, by, 120, bh, '↻ 最初から', retry, { size: 14 });
+    btn(272, by, 120, bh, '💡ヒント', showHint, { primary: true, size: 16, disabled: state !== 'play' });
+    text('ぶつけた ' + bumps, 200, by + 25, 13, bumps ? '#ffb070' : '#9ab', 'center');
+  }
+  // HUD
+  ctx.fillStyle = 'rgba(8,10,30,.85)'; ctx.fillRect(0, 0, W, 50);
+  text('STAGE ' + stage, W / 2, 18, 18, '#fff', 'center');
+  if (state !== 'title') text('のこり ' + remaining() + ' / ' + total + '台', W / 2, 38, 11, '#9ab', 'center', false);
+  text('BEST ' + best, 10, 25, 11, '#9ab', 'left', false);
+  btn(W - 46, 8, 38, 34, muted ? '🔇' : '🔊', () => { muted = !muted; lsSet('parkingMute', muted ? '1' : '0'); }, { size: 16 });
+
+  if (state === 'title') {
+    panel('PARKING OUT', ['満車の駐車場から全部の車を出そう!', '', 'タップ: 車が前へ走る', 'スワイプ: スワイプした向き(前/後ろ)へ走る', '他の車やパイロンにぶつかると戻ってくる', 'ぶつけずにクリアすると ★3']);
+    btn(40, 470, 54, 54, '◀', () => { if (stage > 1) { stage--; sfx.ui(); } }, { size: 20, disabled: stage <= 1 });
+    text('STAGE ' + stage, 147, 497, 16, '#fff', 'center');
+    btn(200, 470, 54, 54, '▶', () => { if (stage < Math.min(MAX_STAGE, best + 1)) { stage++; sfx.ui(); } }, { size: 20, disabled: stage >= Math.min(MAX_STAGE, best + 1) });
+    btn(266, 462, 110, 70, 'START', start, { primary: true, size: 20 });
+  } else if (state === 'clear' && clearT > 30) {
+    const st = bumps === 0 ? 3 : bumps <= 2 ? 2 : 1;
+    panel('ALL CLEAR!', ['STAGE ' + stage + '  ぶつけた回数 ' + bumps]);
+    text('★'.repeat(st) + '☆'.repeat(3 - st), W / 2, 330, 40, '#ffd23f', 'center');
+    btn(40, 430, 140, 56, 'もう一度', retry);
+    if (stage < MAX_STAGE) btn(220, 430, 140, 56, '次へ ▶', nextStage, { primary: true, size: 18 });
+  }
+}
+function panel(title, lines) {
+  ctx.fillStyle = 'rgba(5,6,15,.82)'; ctx.fillRect(0, 50, W, H - 50);
+  text(title, W / 2, 190, 38, '#ffe27a', 'center');
+  lines.forEach((l, i) => text(l, W / 2, 250 + i * 26, 13, '#cde', 'center', false));
+}
+
+// ======================= 入力 =======================
+function pos(e) { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height }; }
+function carAt(p) {
+  const x = Math.floor((p.x - OX) / CS), y = Math.floor((p.y - OY) / CS);
+  if (x < 0 || y < 0 || x >= C || y >= R) return null;
+  const id = grid[y][x]; return typeof id === 'number' ? cars[id] : null;
+}
+cv.addEventListener('pointerdown', e => {
+  initAudio();
+  const p = pos(e);
+  for (let i = buttons.length - 1; i >= 0; i--) { const b = buttons[i]; if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) { b.fn(); return; } }
+  if (state !== 'play') return;
+  const c = carAt(p);
+  if (c) { drag = { c, x: p.x, y: p.y, done: false }; try { cv.setPointerCapture(e.pointerId); } catch (_) {} }
+});
+cv.addEventListener('pointermove', e => {   // スワイプは指を離す前に一定距離で確定(反応を早く)
+  if (!drag || drag.done) return;
+  const p = pos(e), a = drag.c.h ? p.x - drag.x : p.y - drag.y;
+  if (Math.abs(a) > 18) { drag.done = true; drive(drag.c, Math.sign(a)); }
+});
+cv.addEventListener('pointerup', e => {
+  if (!drag) return;
+  if (!drag.done) {
+    const p = pos(e), a = drag.c.h ? p.x - drag.x : p.y - drag.y;
+    drive(drag.c, Math.abs(a) > 10 ? Math.sign(a) : drag.c.f);
+  }
+  drag = null;
+});
+cv.addEventListener('pointercancel', () => { drag = null; });
+addEventListener('keydown', e => {
+  initAudio();
+  const k = e.key.toLowerCase();
+  if (k === 'enter') { if (state === 'title') start(); else if (state === 'clear') nextStage(); }
+  else if (k === 'r' && state !== 'title') retry();
+  else if (k === 'h') showHint();
+  else if (k === 'm') { muted = !muted; lsSet('parkingMute', muted ? '1' : '0'); }
+});
+
+// ======================= ループ =======================
+let last = 0, acc = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  acc += Math.min(.1, (t - last) / 1000); last = t;
+  while (acc >= STEP) { update(); acc -= STEP; }
+  draw();
+}
+requestAnimationFrame(t => { last = t; frame(t); });
+window.__game = { get state() { return state; }, get cars() { return cars; }, genStage, probe, drive, get grid() { return grid; }, get geo() { return { C, R, CS, OX, OY }; } };
+</script>
+<script src="../assets/back-button.js"></script>
+</body>
+</html>

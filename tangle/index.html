@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Tangle Free - ロープほどきパズル</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none; background: #05060f; color: #cde; font-family: monospace; }
+  body { height: 100dvh; padding: 44px 6px 4px; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  canvas { background: #000; border: 2px solid #335; aspect-ratio: 400 / 700; height: auto;
+           width: min(100%, calc((100dvh - 44px - 30px) * 0.5714)); touch-action: none; }
+  p { margin: 4px; font-size: 11px; line-height: 1.4; opacity: .8; text-align: center; }
+  @media (max-width: 700px) { p.pc { display: none; } }
+</style>
+<script src="../assets/audio-unlock.js"></script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<p class="pc">ドラッグ: ピンを空いた穴へ移す 　Z: 戻す 　R: やり直し 　M: 音 　Enter: スタート/次へ</p>
+<script>
+// ======================= 基本 =======================
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = 400, H = 700, DPR = Math.min(2, window.devicePixelRatio || 1), STEP = 1 / 60;
+cv.width = W * DPR; cv.height = H * DPR;
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+const KEY_BEST = 'tangleBest', KEY_CUR = 'tangleCur', MAX_STAGE = 99;
+let best = parseInt(lsGet(KEY_BEST) || '0', 10) || 0;
+let stage = Math.max(1, Math.min(best + 1, parseInt(lsGet(KEY_CUR) || '1', 10) || 1));
+
+// ======================= 音 =======================
+let actx = null, muted = lsGet('tangleMute') === '1';
+function initAudio() {
+  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (actx && actx.state === 'suspended' && actx.resume) actx.resume();
+}
+function tone(f, d, type, v, slide, delay) {
+  if (muted || !actx) return;
+  const t = actx.currentTime + (delay || 0), o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || 'sine'; o.frequency.setValueAtTime(f, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, f + slide), t + d);
+  g.gain.setValueAtTime(v || 0.07, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + d + 0.02);
+}
+const sfx = {
+  pick() { tone(500, 0.07, 'triangle', 0.06, 200); },
+  drop() { tone(300, 0.08, 'triangle', 0.07, -120); },
+  free() { tone(660, 0.1, 'sine', 0.06); tone(990, 0.14, 'sine', 0.05, 0, 0.07); },
+  locked() { tone(140, 0.14, 'square', 0.05, -30); },
+  clear() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.2, 'triangle', 0.07, 0, i * 0.09)); },
+  ui() { tone(520, 0.04, 'square', 0.03); },
+};
+
+// ======================= 描画ヘルパ =======================
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function text(s, x, y, size, col, align, bold) {
+  ctx.font = (bold === false ? '' : 'bold ') + size + 'px monospace';
+  ctx.fillStyle = col || '#cde'; ctx.textAlign = align || 'left'; ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+}
+let buttons = [];
+function btn(x, y, w, h, label, fn, o) {
+  o = o || {};
+  ctx.globalAlpha = o.disabled ? .35 : 1;
+  ctx.fillStyle = o.primary ? '#3a6ae0' : 'rgba(28,36,78,.92)'; rr(x, y, w, h, 10); ctx.fill();
+  ctx.strokeStyle = o.primary ? '#9ab8ff' : '#4a62a8'; ctx.lineWidth = 1.5; ctx.stroke();
+  text(label, x + w / 2, y + h / 2 + 1, o.size || 14, '#fff', 'center');
+  ctx.globalAlpha = 1;
+  if (!o.disabled) buttons.push({ x, y, w, h, fn });
+}
+function rng(seed) {
+  return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+const BG = document.createElement('canvas'); BG.width = W; BG.height = H;
+(function () {
+  const g = BG.getContext('2d'), grd = g.createLinearGradient(0, 0, 0, H);
+  grd.addColorStop(0, '#0b0c26'); grd.addColorStop(1, '#22163f'); g.fillStyle = grd; g.fillRect(0, 0, W, H);
+  let s = 5; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 90; i++) { g.fillStyle = 'rgba(255,255,255,' + (0.2 + rnd() * .5) + ')'; g.fillRect(rnd() * W, rnd() * H, 1.3, 1.3); }
+})();
+
+// ======================= 盤面ロジック =======================
+// ropes[i] = { a, b: 穴の番号, z: 重なり順(大きいほど上), col }
+const RCOL = ['#ff5a5a', '#3d8bff', '#ffd23f', '#4fd65a', '#c066ff', '#ff9a2e', '#2fe0d0', '#ff6fc0'];
+const sizeOf = s => ({ gc: s < 4 ? 3 : 4, gr: Math.min(5, 3 + Math.floor(s / 3)), n: Math.min(7, 2 + Math.ceil(s / 2)) });
+let GC = 3, GR = 3;
+const hx = h => h % GC, hy = h => Math.floor(h / GC);
+function orient(ax, ay, bx, by, cx, cy) { return Math.sign((bx - ax) * (cy - ay) - (by - ay) * (cx - ax)); }
+function onSeg(ax, ay, bx, by, cx, cy) { return Math.min(ax, bx) <= cx && cx <= Math.max(ax, bx) && Math.min(ay, by) <= cy && cy <= Math.max(ay, by); }
+// 2本の紐が交わるか(端が相手の紐の上に乗る・一直線に重なる場合も交差扱い)
+function crosses(r, s) {
+  const ax = hx(r.a), ay = hy(r.a), bx = hx(r.b), by = hy(r.b), cx = hx(s.a), cy = hy(s.a), dx = hx(s.b), dy = hy(s.b);
+  const o1 = orient(ax, ay, bx, by, cx, cy), o2 = orient(ax, ay, bx, by, dx, dy), o3 = orient(cx, cy, dx, dy, ax, ay), o4 = orient(cx, cy, dx, dy, bx, by);
+  if (o1 !== o2 && o3 !== o4) return true;
+  if (o1 === 0 && onSeg(ax, ay, bx, by, cx, cy)) return true;
+  if (o2 === 0 && onSeg(ax, ay, bx, by, dx, dy)) return true;
+  if (o3 === 0 && onSeg(cx, cy, dx, dy, ax, ay)) return true;
+  if (o4 === 0 && onSeg(cx, cy, dx, dy, bx, by)) return true;
+  return false;
+}
+const crossers = (rs, i) => rs.map((s, j) => j).filter(j => j !== i && crosses(rs[i], rs[j]));
+const isFree = (rs, i) => crossers(rs, i).length === 0;
+const canMove = (rs, i) => crossers(rs, i).every(j => rs[j].z < rs[i].z);   // 上に何も乗っていない
+const countX = rs => { let n = 0; for (let i = 0; i < rs.length; i++) for (let j = i + 1; j < rs.length; j++) if (crosses(rs[i], rs[j])) n++; return n; };
+function normZ(rs) { rs.slice().sort((p, q) => p.z - q.z).forEach((r, k) => r.z = k); }
+function genStage(s) {
+  const r = rng(s * 30011 + 77), { gc, gr, n } = sizeOf(s);
+  GC = gc; GR = gr;
+  const NH = gc * gr;
+  let bestSet = null, bestX = -1;
+  for (let tries = 0; tries < 40; tries++) {
+    // 1) 交差なしの配置を作る
+    let rs = null;
+    for (let k = 0; k < 200 && !rs; k++) {
+      const holes = [...Array(NH).keys()];
+      for (let i = holes.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [holes[i], holes[j]] = [holes[j], holes[i]]; }
+      const cand = [];
+      for (let i = 0; i < n; i++) cand.push({ a: holes[i * 2], b: holes[i * 2 + 1], z: i, col: RCOL[i] });
+      if (countX(cand) === 0) rs = cand;
+    }
+    if (!rs) continue;
+    // 2) 逆再生: 一番上の紐のピンを動かし、その紐を「交差相手のすぐ上」の高さに戻す。
+    //    順方向に見ると「動かせる紐を動かす→一番上になる」正しい手順になるので、必ず解ける。
+    const steps = n + 1 + Math.floor(r() * 3);
+    for (let st = 0; st < steps; st++) {
+      const used = new Set(); rs.forEach(q => { used.add(q.a); used.add(q.b); });
+      const empty = [...Array(NH).keys()].filter(h => !used.has(h));
+      const top = rs.reduce((m, q, i) => q.z > rs[m].z ? i : m, 0);
+      let bestMv = null, bestScore = -1;
+      for (let c = 0; c < 8; c++) {
+        const end = r() < .5 ? 'a' : 'b', h = empty[Math.floor(r() * empty.length)];
+        const old = rs[top][end]; rs[top][end] = h;
+        const sc = crossers(rs, top).length + r() * .5;
+        rs[top][end] = old;
+        if (sc > bestScore) { bestScore = sc; bestMv = { end, h }; }
+      }
+      rs[top][bestMv.end] = bestMv.h;
+      const cr = crossers(rs, top);
+      const others = rs.filter((q, i) => i !== top).map(q => q.z);
+      // 交差相手より上なら、どの高さでもよい。なるべく低く入れて絡ませる
+      const minZ = cr.length ? Math.max(...cr.map(j => rs[j].z)) : -1;
+      const choices = others.filter(z => z > minZ);
+      rs[top].z = choices.length ? choices[Math.floor(r() * choices.length)] - .5 : Math.max(...others) + .5;
+      normZ(rs);
+    }
+    const x = countX(rs);
+    if (x > bestX) { bestX = x; bestSet = { gc, gr, ropes: rs.map(q => Object.assign({}, q)), par: steps }; }
+    if (x >= Math.min(n + 1, 3 + Math.floor(s / 2))) break;
+  }
+  const opt = shortest(bestSet.ropes, gc * gr, bestSet.par, 8000);   // 目安手数 = 最短手数(探索できた範囲で)
+  if (opt) bestSet.par = opt;
+  return bestSet;
+}
+// 反復深化で最短手数を探す。nodes 上限を超えたら null
+function shortest(rs0, NH, maxD, limit) {
+  let nodes = 0;
+  function dfs(rs, depth) {
+    if (countX(rs) === 0) return true;
+    if (depth === 0 || ++nodes > limit) return false;
+    const used = new Set(); rs.forEach(q => { used.add(q.a); used.add(q.b); });
+    const maxz = Math.max(...rs.map(q => q.z));
+    for (let i = 0; i < rs.length; i++) {
+      if (!canMove(rs, i)) continue;
+      for (const e of ['a', 'b']) for (let h = 0; h < NH; h++) {
+        if (used.has(h)) continue;
+        const n = rs.map(q => Object.assign({}, q)); n[i][e] = h; n[i].z = maxz + 1;
+        if (dfs(n, depth - 1)) return true;
+      }
+    }
+    return false;
+  }
+  for (let k = 1; k < maxD; k++) { if (dfs(rs0, k)) return k; if (nodes > limit) return null; }
+  return null;
+}
+
+// ======================= 状態 =======================
+let state = 'title';
+let ropes = [], hist = [], moves = 0, par = 0, drag = null, shake = null, clearT = 0, sparks = [], freeSet = new Set();
+let HX0 = 0, HY0 = 0, HS = 80;
+function holePos(h) { return { x: HX0 + hx(h) * HS, y: HY0 + hy(h) * HS }; }
+function loadStage() {
+  const d = genStage(stage);
+  GC = d.gc; GR = d.gr; ropes = d.ropes.map(q => Object.assign({}, q)); par = d.par;
+  HS = Math.min((W - 80) / (GC - 1), 470 / (GR - 1), 110);
+  HX0 = W / 2 - HS * (GC - 1) / 2; HY0 = 340 - HS * (GR - 1) / 2;
+  hist = []; moves = 0; drag = null; shake = null; sparks = [];
+  freeSet = new Set(ropes.map((q, i) => i).filter(i => isFree(ropes, i)));
+  lsSet(KEY_CUR, String(stage));
+}
+function start() { initAudio(); loadStage(); state = 'play'; }
+function retry() { loadStage(); state = 'play'; sfx.ui(); }
+function nextStage() { stage = Math.min(MAX_STAGE, stage + 1); start(); }
+function undo() {
+  if (state !== 'play' || !hist.length || drag) return;
+  ropes = hist.pop(); moves = Math.max(0, moves - 1); sfx.ui();
+  freeSet = new Set(ropes.map((q, i) => i).filter(i => isFree(ropes, i)));
+}
+function occupied(h) { return ropes.some(q => q.a === h || q.b === h); }
+function afterMove() {
+  const now = new Set(ropes.map((q, i) => i).filter(i => isFree(ropes, i)));
+  now.forEach(i => {
+    if (freeSet.has(i)) return;
+    sfx.free();
+    [ropes[i].a, ropes[i].b].forEach(h => { const p = holePos(h); for (let k = 0; k < 8; k++) { const a = Math.random() * 7, v = 1 + Math.random() * 2; sparks.push({ x: p.x, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 30, col: ropes[i].col }); } });
+  });
+  freeSet = now;
+  if (countX(ropes) === 0) {
+    state = 'clear'; clearT = 0; sfx.clear();
+    if (stage > best) { best = stage; lsSet(KEY_BEST, String(best)); }
+  }
+}
+
+// ======================= 更新 =======================
+function update() {
+  if (shake && (shake.t += STEP) > .35) shake = null;
+  sparks.forEach(p => { p.x += p.vx; p.y += p.vy; p.vy += .05; p.life--; }); sparks = sparks.filter(p => p.life > 0);
+  if (state === 'clear') clearT++;
+}
+
+// ======================= 描画 =======================
+function ropeEnds(i) {
+  const q = ropes[i];
+  let A = holePos(q.a), B = holePos(q.b);
+  if (drag && drag.i === i) { if (drag.end === 'a') A = { x: drag.x, y: drag.y }; else B = { x: drag.x, y: drag.y }; }
+  if (shake && shake.i === i) { const k = Math.sin(shake.t * 70) * 4; A = { x: A.x + k, y: A.y }; B = { x: B.x + k, y: B.y }; }
+  return [A, B];
+}
+function drawRope(i) {
+  const q = ropes[i], [A, B] = ropeEnds(i), lifted = drag && drag.i === i;
+  const mv = canMove(ropes, i), free = freeSet.has(i);
+  ctx.save();
+  if (lifted) { ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = 14; ctx.shadowOffsetY = 6; }
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(0,0,0,.55)'; ctx.lineWidth = 15; ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke();
+  ctx.shadowColor = 'transparent';
+  ctx.strokeStyle = q.col; ctx.lineWidth = 11; ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke();
+  // より糸の模様
+  const len = Math.hypot(B.x - A.x, B.y - A.y), ux = (B.x - A.x) / len, uy = (B.y - A.y) / len;
+  ctx.strokeStyle = 'rgba(0,0,0,.22)'; ctx.lineWidth = 2;
+  for (let d = 8; d < len - 4; d += 9) { const x = A.x + ux * d, y = A.y + uy * d; ctx.beginPath(); ctx.moveTo(x - uy * 5 - ux * 2, y + ux * 5 - uy * 2); ctx.lineTo(x + uy * 5 + ux * 2, y - ux * 5 + uy * 2); ctx.stroke(); }
+  ctx.strokeStyle = 'rgba(255,255,255,.28)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(A.x - uy * 3, A.y + ux * 3); ctx.lineTo(B.x - uy * 3, B.y + ux * 3); ctx.stroke();
+  // ピン
+  [A, B].forEach(P => {
+    ctx.fillStyle = 'rgba(0,0,0,.4)'; ctx.beginPath(); ctx.arc(P.x + 1, P.y + 3, 13, 0, 7); ctx.fill();
+    const g = ctx.createRadialGradient(P.x - 4, P.y - 4, 2, P.x, P.y, 13);
+    g.addColorStop(0, '#fff'); g.addColorStop(.5, q.col); g.addColorStop(1, '#00000088');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(P.x, P.y, 12, 0, 7); ctx.fill();
+    ctx.strokeStyle = free ? '#9dffb8' : mv ? '#fff' : 'rgba(0,0,0,.6)'; ctx.lineWidth = free || mv ? 2.5 : 1.5; ctx.stroke();
+    if (!mv) { ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.beginPath(); ctx.arc(P.x, P.y, 12, 0, 7); ctx.fill(); text('🔒', P.x, P.y + 1, 10, '#fff', 'center', false); }
+  });
+  ctx.restore();
+}
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  buttons = [];
+  ctx.drawImage(BG, 0, 0);
+  if (state !== 'title') {
+    // 盤
+    ctx.fillStyle = 'rgba(60,70,120,.35)'; rr(HX0 - 40, HY0 - 40, HS * (GC - 1) + 80, HS * (GR - 1) + 80, 22); ctx.fill();
+    ctx.strokeStyle = 'rgba(140,160,255,.35)'; ctx.lineWidth = 2; ctx.stroke();
+    for (let h = 0; h < GC * GR; h++) {
+      const p = holePos(h);
+      ctx.fillStyle = '#0a0c1e'; ctx.beginPath(); ctx.arc(p.x, p.y, 10, 0, 7); ctx.fill();
+      ctx.strokeStyle = 'rgba(160,180,255,.5)'; ctx.lineWidth = 2; ctx.stroke();
+    }
+    if (drag) {   // 落とせる穴を強調
+      for (let h = 0; h < GC * GR; h++) if (!occupied(h)) { const p = holePos(h); ctx.strokeStyle = 'rgba(255,226,122,.6)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(p.x, p.y, 15, 0, 7); ctx.stroke(); }
+    }
+    const order = ropes.map((q, i) => i).sort((a, b) => ropes[a].z - ropes[b].z);
+    if (drag) { order.splice(order.indexOf(drag.i), 1); order.push(drag.i); }
+    order.forEach(drawRope);
+    sparks.forEach(p => { ctx.globalAlpha = p.life / 30; ctx.fillStyle = p.col; ctx.fillRect(p.x - 2, p.y - 2, 4, 4); });
+    ctx.globalAlpha = 1;
+    const by = 636, bh = 50;
+    btn(8, by, 120, bh, '↻ 最初から', retry, { size: 14 });
+    btn(272, by, 120, bh, '↶ 戻す', undo, { primary: true, size: 16, disabled: !hist.length || state !== 'play' });
+    text('ほどけた ' + freeSet.size + '/' + ropes.length, 200, by + 25, 13, '#9dffb8', 'center');
+    text('🔒 = 上に別の紐が乗っていて動かせない', W / 2, 606, 11, '#9ab', 'center', false);
+  }
+  ctx.fillStyle = 'rgba(8,10,30,.85)'; ctx.fillRect(0, 0, W, 50);
+  text('STAGE ' + stage, W / 2, 18, 18, '#fff', 'center');
+  if (state !== 'title') text('手数 ' + moves + '  (目安 ' + par + ')', W / 2, 38, 11, '#9ab', 'center', false);
+  text('BEST ' + best, 10, 25, 11, '#9ab', 'left', false);
+  btn(W - 46, 8, 38, 34, muted ? '🔇' : '🔊', () => { muted = !muted; lsSet('tangleMute', muted ? '1' : '0'); }, { size: 16 });
+
+  if (state === 'title') {
+    panel('TANGLE FREE', ['絡まったロープをほどこう!', '', 'ピンをドラッグして空いた穴へ移す', '動かしたロープは一番上に乗る', '上に別のロープが乗っているピンは動かせない', 'どのロープも交差しなくなればクリア']);
+    btn(40, 470, 54, 54, '◀', () => { if (stage > 1) { stage--; sfx.ui(); } }, { size: 20, disabled: stage <= 1 });
+    text('STAGE ' + stage, 147, 497, 16, '#fff', 'center');
+    btn(200, 470, 54, 54, '▶', () => { if (stage < Math.min(MAX_STAGE, best + 1)) { stage++; sfx.ui(); } }, { size: 20, disabled: stage >= Math.min(MAX_STAGE, best + 1) });
+    btn(266, 462, 110, 70, 'START', start, { primary: true, size: 20 });
+  } else if (state === 'clear' && clearT > 40) {
+    const st = moves <= par ? 3 : moves <= par + 3 ? 2 : 1;
+    panel('UNTANGLED!', ['STAGE ' + stage + '  手数 ' + moves + ' (目安 ' + par + ')']);
+    text('★'.repeat(st) + '☆'.repeat(3 - st), W / 2, 330, 40, '#ffd23f', 'center');
+    btn(40, 430, 140, 56, 'もう一度', retry);
+    if (stage < MAX_STAGE) btn(220, 430, 140, 56, '次へ ▶', nextStage, { primary: true, size: 18 });
+  }
+}
+function panel(title, lines) {
+  ctx.fillStyle = 'rgba(5,6,15,.82)'; ctx.fillRect(0, 50, W, H - 50);
+  text(title, W / 2, 190, 38, '#ffe27a', 'center');
+  lines.forEach((l, i) => text(l, W / 2, 250 + i * 26, 13, '#cde', 'center', false));
+}
+
+// ======================= 入力 =======================
+function pos(e) { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height }; }
+cv.addEventListener('pointerdown', e => {
+  initAudio();
+  const p = pos(e);
+  for (let i = buttons.length - 1; i >= 0; i--) { const b = buttons[i]; if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) { b.fn(); return; } }
+  if (state !== 'play' || drag) return;
+  // 一番近いピン(上にある紐を優先)
+  let hit = null, bd = 26 * 26;
+  ropes.forEach((q, i) => ['a', 'b'].forEach(end => {
+    const P = holePos(q[end]), d = (P.x - p.x) ** 2 + (P.y - p.y) ** 2;
+    if (d < bd || (hit && d === bd && q.z > ropes[hit.i].z)) { bd = d; hit = { i, end }; }
+  }));
+  if (!hit) return;
+  if (!canMove(ropes, hit.i)) { shake = { i: hit.i, t: 0 }; sfx.locked(); return; }
+  drag = { i: hit.i, end: hit.end, x: p.x, y: p.y };
+  sfx.pick();
+  try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+});
+cv.addEventListener('pointermove', e => { if (!drag) return; const p = pos(e); drag.x = p.x; drag.y = p.y; });
+function release() {
+  if (!drag) return;
+  const q = ropes[drag.i];
+  let target = null, bd = (HS * .5) ** 2;
+  for (let h = 0; h < GC * GR; h++) {
+    if (occupied(h)) continue;
+    const P = holePos(h), d = (P.x - drag.x) ** 2 + (P.y - drag.y) ** 2;
+    if (d < bd) { bd = d; target = h; }
+  }
+  if (target !== null) {
+    hist.push(ropes.map(o => Object.assign({}, o)));
+    q[drag.end] = target; q.z = Math.max(...ropes.map(o => o.z)) + 1; normZ(ropes);
+    moves++; sfx.drop(); drag = null; afterMove();
+  } else drag = null;
+}
+cv.addEventListener('pointerup', release);
+cv.addEventListener('pointercancel', () => { drag = null; });
+addEventListener('keydown', e => {
+  initAudio();
+  const k = e.key.toLowerCase();
+  if (k === 'enter') { if (state === 'title') start(); else if (state === 'clear') nextStage(); }
+  else if (k === 'z') undo();
+  else if (k === 'r' && state !== 'title') retry();
+  else if (k === 'm') { muted = !muted; lsSet('tangleMute', muted ? '1' : '0'); }
+});
+
+// ======================= ループ =======================
+let last = 0, acc = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  acc += Math.min(.1, (t - last) / 1000); last = t;
+  while (acc >= STEP) { update(); acc -= STEP; }
+  draw();
+}
+requestAnimationFrame(t => { last = t; frame(t); });
+window.__game = { get state() { return state; }, get ropes() { return ropes; }, genStage, countX, canMove, holePos, get geo() { return { GC, GR }; }, crosses };
+</script>
+<script src="../assets/back-button.js"></script>
+</body>
+</html>
