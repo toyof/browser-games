@@ -10,13 +10,27 @@
   Patched.prototype = Orig.prototype;
   window.AudioContext = Patched; window.webkitAudioContext = Patched;
 
+  // 0.5秒の無音 WAV(8kHz/8bit/モノラル)を生成する。
+  // 注意: データ長0の WAV を loop 再生すると、先頭へのシークが毎秒数万回発生して
+  // CPU を使い切り、ページが固まる・メモリが増え続ける。必ず長さのある音声にすること。
+  function silentWavUrl() {
+    var n = 4000, b = new Uint8Array(44 + n), v = new DataView(b.buffer);
+    function str(o, s) { for (var i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i); }
+    str(0, 'RIFF'); v.setUint32(4, 36 + n, true); str(8, 'WAVE');
+    str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+    str(36, 'data'); v.setUint32(40, n, true);
+    b.fill(128, 44); // 8bit PCM の無音は 128
+    return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
+  }
+
   var el = null;
   function unlock() {
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
     list.forEach(function (c) { if (c.state !== 'running') { try { c.resume(); } catch (e) {} } });
     if (!el) {
       try {
-        el = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=');
+        el = new Audio(silentWavUrl());
         el.loop = true; el.setAttribute('playsinline', '');
         var p = el.play(); if (p && p.catch) p.catch(function () { el = null; });
       } catch (e) { el = null; }
