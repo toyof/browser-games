@@ -869,7 +869,8 @@ function strokeEnd() { // 指を離したとき: 最後の点を近くの地面�
 function strokeTo(p) {
   if (!prev) { p = strokeStart(p); prev = p; addPoint(p); return; }
   const dx = p.x - prev.x, dy = p.y - prev.y, d = Math.hypot(dx, dy);
-  const n = Math.max(1, Math.ceil(d / 8)); // 道のセグメントは約8px間隔(多すぎると当たり判定が重くなる)
+  // 道のセグメントは約8px間隔(多すぎると当たり判定が重くなる)。削るときは地面の列(COL=4px)を飛ばさないよう3px間隔
+  const n = Math.max(1, Math.ceil(d / (tool === 'carve' ? 3 : 8)));
   for (let i = 1; i <= n; i++) addPoint({ x: prev.x + dx * i / n, y: prev.y + dy * i / n });
   prev = p;
 }
