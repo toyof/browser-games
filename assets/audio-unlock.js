@@ -24,11 +24,16 @@
     return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
   }
 
+  // 無音ループが必要なのは「iOS で、audioSession API が無い古い版」だけ。
+  // PC/Android/新しい iOS では不要で、iPhone で聴いている音楽を止めてしまう副作用もあるため流さない。
+  var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  var needSilentLoop = isIOS && !navigator.audioSession;
+
   var el = null;
   function unlock() {
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
     list.forEach(function (c) { if (c.state !== 'running') { try { c.resume(); } catch (e) {} } });
-    if (!el) {
+    if (needSilentLoop && !el) {
       try {
         el = new Audio(silentWavUrl());
         el.loop = true; el.setAttribute('playsinline', '');
