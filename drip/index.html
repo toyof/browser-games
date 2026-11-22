@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Drip Line - 線を描いて水をカップへ</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none; background: #05060f; color: #cde; font-family: monospace; }
+  body { height: 100dvh; padding: 44px 6px 4px; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  canvas { background: #000; border: 2px solid #335; aspect-ratio: 400 / 700; height: auto;
+           width: min(100%, calc((100dvh - 44px - 30px) * 0.5714)); touch-action: none; }
+  p { margin: 4px; font-size: 11px; line-height: 1.4; opacity: .8; text-align: center; }
+  @media (max-width: 700px) { p.pc { display: none; } }
+</style>
+<script src="../assets/audio-unlock.js"></script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<p class="pc">ドラッグ: 線を描く(離すと水が出る) 　R: やり直し 　H: ヒント 　M: 音 　Enter: スタート/次へ</p>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script>
+// ======================= 基本 =======================
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = 400, H = 700, DPR = Math.min(2, window.devicePixelRatio || 1), STEP = 1 / 60;
+cv.width = W * DPR; cv.height = H * DPR;
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+const KEY_BEST = 'dripBest', KEY_CUR = 'dripCur';
+
+// ======================= 音 =======================
+let actx = null, muted = lsGet('dripMute') === '1';
+function initAudio() {
+  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (actx && actx.state === 'suspended' && actx.resume) actx.resume();
+}
+function tone(f, d, type, v, slide, delay) {
+  if (muted || !actx) return;
+  const t = actx.currentTime + (delay || 0), o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || 'sine'; o.frequency.setValueAtTime(f, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, f + slide), t + d);
+  g.gain.setValueAtTime(v || 0.07, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + d + 0.02);
+}
+const sfx = {
+  drip() { tone(900 + Math.random() * 500, 0.05, 'sine', 0.025, -500); },
+  inCup() { tone(1200 + Math.random() * 300, 0.04, 'sine', 0.02, 300); },
+  start() { tone(300, 0.15, 'triangle', 0.06, 300); },
+  clear() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.2, 'triangle', 0.07, 0, i * 0.09)); },
+  fail() { [392, 330, 262].forEach((f, i) => tone(f, 0.25, 'sawtooth', 0.05, -20, i * 0.15)); },
+  ui() { tone(520, 0.04, 'square', 0.03); },
+};
+
+// ======================= 描画ヘルパ =======================
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function text(s, x, y, size, col, align, bold) {
+  ctx.font = (bold === false ? '' : 'bold ') + size + 'px monospace';
+  ctx.fillStyle = col || '#cde'; ctx.textAlign = align || 'left'; ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+}
+let buttons = [];
+function btn(x, y, w, h, label, fn, o) {
+  o = o || {};
+  ctx.globalAlpha = o.disabled ? .35 : 1;
+  ctx.fillStyle = o.primary ? '#3a6ae0' : 'rgba(28,36,78,.92)'; rr(x, y, w, h, 10); ctx.fill();
+  ctx.strokeStyle = o.primary ? '#9ab8ff' : '#4a62a8'; ctx.lineWidth = 1.5; ctx.stroke();
+  text(label, x + w / 2, y + h / 2 + 1, o.size || 14, '#fff', 'center');
+  ctx.globalAlpha = 1;
+  if (!o.disabled) buttons.push({ x, y, w, h, fn });
+}
+const BG = document.createElement('canvas'); BG.width = W; BG.height = H;
+(function () {
+  const g = BG.getContext('2d'), grd = g.createLinearGradient(0, 0, 0, H);
+  grd.addColorStop(0, '#0d1030'); grd.addColorStop(1, '#1a1f48'); g.fillStyle = grd; g.fillRect(0, 0, W, H);
+  g.strokeStyle = 'rgba(120,140,220,.07)'; g.lineWidth = 1;
+  for (let x = 0; x <= W; x += 25) { g.beginPath(); g.moveTo(x, 50); g.lineTo(x, 625); g.stroke(); }
+  for (let y = 50; y <= 625; y += 25) { g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); }
+})();
+
+// ======================= ステージ =======================
+// f: 蛇口 [x,y] / cup: [中心x, 底y, 幅, 高さ] / walls: [x1,y1,x2,y2] 固定の板 / nails: [x,y] 固定の釘
+// ink: 線の長さ上限(px) / need: カップに入れる水滴数 / sol: 想定解(ヒント表示にも使う)
+const LEVELS = [
+  { name: 'はじめの一本', f: [110, 90], cup: [290, 600, 110, 130], walls: [], nails: [[100, 400]],
+    ink: 400, need: 35, sol: [[50, 361.2], [300, 497.9]] },
+  { name: '釘の橋', f: [70, 90], cup: [330, 600, 110, 150], walls: [], nails: [[60, 300], [180, 385]],
+    ink: 420, need: 35, sol: [[40, 274.3], [330, 480.8]] },
+  { name: '逆向き', f: [330, 90], cup: [70, 600, 110, 150], walls: [], nails: [[340, 300], [220, 385]],
+    ink: 420, need: 35, sol: [[360, 274.3], [70, 480.8]] },
+  { name: '屋根の下', f: [200, 90], cup: [200, 600, 110, 150], walls: [[130, 230, 260, 270], [393, 250, 393, 360]], nails: [[370, 402]],
+    ink: 320, need: 35, sol: [[382, 385.6], [200, 467.4]] },
+  { name: 'すべり台', f: [80, 90], cup: [330, 600, 110, 150], walls: [[20, 250, 170, 310]], nails: [[190, 390]],
+    ink: 260, need: 30, sol: [[170, 363.7], [330, 482.3]] },
+  { name: 'はね返し', f: [200, 90], cup: [80, 600, 110, 150], walls: [[180, 250, 320, 320]], nails: [[340, 362]],
+    ink: 440, need: 30, sol: [[392, 272], [392, 327.1], [80, 467.4]] },
+  { name: 'ジグザグ', f: [60, 90], cup: [330, 600, 110, 150], walls: [[20, 230, 220, 290], [380, 310, 200, 365]], nails: [[120, 408]],
+    ink: 400, need: 28, sol: [[30, 330], [30, 369.8], [330, 459.8]] },
+  { name: 'すき間くぐり', f: [320, 90], cup: [70, 600, 110, 150], walls: [[200, 150, 200, 375]], nails: [[330, 393]],
+    ink: 360, need: 28, sol: [[360, 372.8], [70, 459.8]] },
+  { name: 'せき止め', f: [200, 90], cup: [335, 600, 100, 110], walls: [[100, 380, 300, 380]], nails: [],
+    ink: 320, need: 55, sol: [[110, 290], [110, 366], [250, 366]] },
+  { name: '最後の一滴', f: [80, 90], cup: [330, 600, 100, 150], walls: [[20, 250, 140, 250], [200, 200, 200, 375]], nails: [[130, 410]],
+    ink: 280, need: 32, sol: [[110, 392.3], [340, 461.3]] },
+];
+const MAX_STAGE = LEVELS.length;
+let best = Math.min(MAX_STAGE, parseInt(lsGet(KEY_BEST) || '0', 10) || 0);
+let stage = Math.max(1, Math.min(best + 1, MAX_STAGE, parseInt(lsGet(KEY_CUR) || '1', 10) || 1));
+
+// ======================= 物理 =======================
+const hasMatter = typeof Matter !== 'undefined';
+const M = hasMatter ? Matter : null;
+const NDROP = 100, DR = 5, LT = 9;
+let VMAX = 5, DF = 0, DA = .015;   // 水滴の最高速度・摩擦・空気抵抗(速すぎるとカップを飛び越える)   // 水滴の数・半径、線の太さ
+let engine = null, statics = [], line = null, drops = [], emitted = 0, emitT = 0, flowT = 0, okT = 0;
+let state = 'title';   // title / draw / flow / clear / fail
+let stroke = null, inkUsed = 0, showHint = false, inCup = 0, clearT = 0, splash = [];
+const L = () => LEVELS[stage - 1];
+function cupRect() { const [cx, by, w, h] = L().cup; return { l: cx - w / 2, r: cx + w / 2, t: by - h, b: by }; }
+function loadStage() {
+  lsSet(KEY_CUR, String(stage));
+  stroke = null; inkUsed = 0; showHint = false; drops = []; emitted = 0; emitT = 0; flowT = 0; okT = 0; inCup = 0; line = null; splash = [];
+  if (!hasMatter) return;
+  engine = M.Engine.create(); engine.gravity.y = 1;
+  engine.positionIterations = 8; engine.velocityIterations = 6;
+  const lv = L(), opt = { isStatic: true, friction: 1, frictionStatic: 3, restitution: 0 };
+  statics = [];
+  lv.walls.forEach(([x1, y1, x2, y2]) => {
+    statics.push(M.Bodies.rectangle((x1 + x2) / 2, (y1 + y2) / 2, Math.hypot(x2 - x1, y2 - y1) + 14, 14, Object.assign({ angle: Math.atan2(y2 - y1, x2 - x1) }, opt)));
+  });
+  lv.nails.forEach(([x, y]) => statics.push(M.Bodies.circle(x, y, 7, opt)));
+  const c = cupRect(), T = 8;
+  statics.push(M.Bodies.rectangle(c.l + T / 2, (c.t + c.b) / 2, T, c.b - c.t, opt));
+  statics.push(M.Bodies.rectangle(c.r - T / 2, (c.t + c.b) / 2, T, c.b - c.t, opt));
+  statics.push(M.Bodies.rectangle((c.l + c.r) / 2, c.b - T / 2, c.r - c.l, T, opt));
+  M.Composite.add(engine.world, statics);
+}
+function start() { initAudio(); loadStage(); state = 'draw'; }
+function retry() { loadStage(); state = 'draw'; sfx.ui(); }
+function nextStage() { if (stage < MAX_STAGE) { stage++; start(); } }
+// 描いた点列を剛体(細い長方形+関節の円の複合体)にする。
+// 長方形は線の太さぶん長くして重ねる(継ぎ目があると、釘がそこにはまって線がすり抜ける)
+function buildLine(pts) {
+  const parts = [], po = { friction: 1, frictionStatic: 4, restitution: 0, density: .02 };   // 衝突はパーツ単位で計算されるので、摩擦はパーツに設定する
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1], len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len < 1) continue;
+    parts.push(M.Bodies.rectangle((a.x + b.x) / 2, (a.y + b.y) / 2, len + LT, LT, Object.assign({ angle: Math.atan2(b.y - a.y, b.x - a.x) }, po)));
+  }
+  pts.forEach((p, i) => { if (i % 2 === 0 || i === pts.length - 1) parts.push(M.Bodies.circle(p.x, p.y, LT / 2, po)); });
+  const body = M.Body.create({ parts, friction: .8, frictionStatic: 2, restitution: 0, density: .003 });
+  M.Composite.add(engine.world, body);
+  return { body, pts: pts.map(p => ({ x: p.x - body.position.x, y: p.y - body.position.y })) };
+}
+function blockedAt(p) {
+  if (p.y < 52 || p.y > 622 || p.x < 2 || p.x > W - 2) return true;
+  const [fx, fy] = L().f; if (Math.abs(p.x - fx) < 18 && p.y < fy + 14) return true;
+  return M.Query.point(statics, p).length > 0;
+}
+function finishStroke() {
+  if (!stroke || stroke.pts.length < 1) { stroke = null; return; }
+  let pts = stroke.pts;
+  if (pts.length === 1) pts = [pts[0], { x: pts[0].x + 2, y: pts[0].y }];
+  line = buildLine(pts); stroke = null;
+  state = 'flow'; sfx.start();
+}
+
+// ======================= 更新 =======================
+function update() {
+  if (state === 'flow' || state === 'clear' || state === 'fail') {
+    if (!engine) return;
+    const lv = L();
+    if (state === 'flow' && emitted < NDROP && (emitT += 1) % 2 === 0) {
+      const d = M.Bodies.circle(lv.f[0] + (Math.random() - .5) * 6, lv.f[1] + 12, DR, { friction: DF, frictionStatic: 0, frictionAir: DA, restitution: .05, density: .0012 });
+      M.Body.setVelocity(d, { x: 0, y: 2 }); d.inside = false;
+      drops.push(d); M.Composite.add(engine.world, d); emitted++;
+      if (emitted % 3 === 0) sfx.drip();
+    }
+    // 2回に分けて進め、水滴の速さに上限を付ける(細い線をすり抜けないように)
+    for (let k = 0; k < 2; k++) {
+      drops.forEach(d => { const v = d.velocity, sp = Math.hypot(v.x, v.y); if (sp > VMAX) M.Body.setVelocity(d, { x: v.x * VMAX / sp, y: v.y * VMAX / sp }); });
+      M.Engine.update(engine, 1000 / 120);
+    }
+    const c = cupRect();
+    let n = 0;
+    drops = drops.filter(d => {
+      if (d.position.y > H + 40 || d.position.x < -40 || d.position.x > W + 40) { M.Composite.remove(engine.world, d); return false; }
+      const ins = d.position.x > c.l + 4 && d.position.x < c.r - 4 && d.position.y > c.t && d.position.y < c.b;
+      if (ins) { n++; if (!d.inside) { d.inside = true; if (Math.random() < .3) sfx.inCup(); for (let k = 0; k < 2; k++) splash.push({ x: d.position.x, y: c.t + 6, vx: (Math.random() - .5) * 2, vy: -1 - Math.random() * 1.5, life: 18 }); } }
+      return true;
+    });
+    inCup = n;
+    if (state === 'flow') {
+      flowT++;
+      if (inCup >= lv.need) { if (++okT > 50) win(); } else okT = 0;
+      if (emitted >= NDROP && state === 'flow') {
+        const moving = drops.some(d => d.speed > .35 && d.position.y < H);
+        if ((flowT > 60 * 5 && !moving) || flowT > 60 * 16) { state = 'fail'; clearT = 0; sfx.fail(); }
+      }
+    }
+  }
+  splash.forEach(p => { p.x += p.vx; p.y += p.vy; p.vy += .15; p.life--; }); splash = splash.filter(p => p.life > 0);
+  if (state === 'clear' || state === 'fail') clearT++;
+}
+function win() {
+  state = 'clear'; clearT = 0; sfx.clear();
+  if (stage > best) { best = stage; lsSet(KEY_BEST, String(best)); }
+}
+const stars = () => { const r = inkUsed / L().ink; return r <= .6 ? 3 : r <= .85 ? 2 : 1; };
+
+// ======================= 描画 =======================
+function drawPolyline(pts, col, w, dash) {
+  if (!pts.length) return;
+  ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = col; ctx.lineWidth = w; if (dash) ctx.setLineDash(dash);
+  ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); pts.forEach(p => ctx.lineTo(p.x, p.y)); if (pts.length === 1) ctx.lineTo(pts[0].x + .1, pts[0].y); ctx.stroke(); ctx.restore();
+}
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  buttons = [];
+  ctx.drawImage(BG, 0, 0);
+  if (state !== 'title') {
+    const lv = L(), c = cupRect();
+    // 固定の板・釘
+    lv.walls.forEach(([x1, y1, x2, y2]) => {
+      ctx.save(); ctx.lineCap = 'round';
+      ctx.strokeStyle = '#2a3358'; ctx.lineWidth = 16; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.strokeStyle = '#7a88c0'; ctx.lineWidth = 12; ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x1, y1 - 3); ctx.lineTo(x2, y2 - 3); ctx.stroke();
+      ctx.restore();
+    });
+    lv.nails.forEach(([x, y]) => {
+      const g = ctx.createRadialGradient(x - 2, y - 2, 1, x, y, 8); g.addColorStop(0, '#fff'); g.addColorStop(1, '#6a7290');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.fill(); ctx.strokeStyle = '#2a3050'; ctx.lineWidth = 1.5; ctx.stroke();
+    });
+    // カップ
+    const fillH = Math.min(1, inCup / lv.need);
+    ctx.fillStyle = 'rgba(160,210,255,.08)'; ctx.fillRect(c.l, c.t, c.r - c.l, c.b - c.t);
+    const ty = c.b - 8 - (c.b - c.t - 8) * .62;   // 目標ライン(見た目)
+    ctx.strokeStyle = 'rgba(255,226,122,.7)'; ctx.setLineDash([5, 4]); ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(c.l + 8, ty); ctx.lineTo(c.r - 8, ty); ctx.stroke(); ctx.setLineDash([]);
+    ctx.strokeStyle = 'rgba(210,230,255,.9)'; ctx.lineWidth = 8; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(c.l + 4, c.t); ctx.lineTo(c.l + 4, c.b - 4); ctx.lineTo(c.r - 4, c.b - 4); ctx.lineTo(c.r - 4, c.t); ctx.stroke();
+    text(inCup >= lv.need ? '😆' : fillH > .5 ? '🙂' : fillH > 0 ? '😮' : '😐', (c.l + c.r) / 2, c.b - 28, 24, '#fff', 'center', false);
+    text(Math.min(100, Math.round(fillH * 100)) + '%', (c.l + c.r) / 2, c.t - 12, 13, inCup >= lv.need ? '#9dffb8' : '#ffe27a', 'center');
+    // 蛇口
+    const [fx, fy] = lv.f;
+    ctx.fillStyle = '#8a94b8'; ctx.fillRect(fx - 7, 50, 14, fy - 50 - 4);
+    ctx.fillStyle = '#b8c2e0'; rr(fx - 13, fy - 8, 26, 16, 5); ctx.fill();
+    ctx.fillStyle = '#3a4468'; ctx.fillRect(fx - 6, fy + 6, 12, 5);
+    // 水滴
+    ctx.fillStyle = 'rgba(70,170,255,.85)';
+    drops.forEach(d => { ctx.beginPath(); ctx.arc(d.position.x, d.position.y, DR + 1.8, 0, 7); ctx.fill(); });
+    ctx.fillStyle = 'rgba(200,235,255,.7)';
+    drops.forEach(d => { ctx.beginPath(); ctx.arc(d.position.x - 1.5, d.position.y - 1.5, 1.6, 0, 7); ctx.fill(); });
+    splash.forEach(p => { ctx.globalAlpha = p.life / 18; ctx.fillStyle = '#9ad4ff'; ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3); }); ctx.globalAlpha = 1;
+    // 描いた線
+    if (line) {
+      const b = line.body;
+      ctx.save(); ctx.translate(b.position.x, b.position.y); ctx.rotate(b.angle);
+      drawPolyline(line.pts, '#1a1020', LT + 3); drawPolyline(line.pts, '#ff7ab0', LT - 1);
+      ctx.restore();
+    }
+    if (stroke) { drawPolyline(stroke.pts, '#1a1020', LT + 3); drawPolyline(stroke.pts, stroke.blocked ? '#ff5a5a' : '#ff7ab0', LT - 1); }
+    if (showHint && state === 'draw') drawPolyline(lv.sol.map(([x, y]) => ({ x, y })), 'rgba(255,226,122,.75)', 4, [8, 8]);
+    // インク残量
+    const left = 1 - inkUsed / lv.ink;
+    text('インク', 10, 607, 11, '#9ab', 'left', false);
+    ctx.fillStyle = 'rgba(255,255,255,.12)'; rr(54, 601, W - 64, 12, 6); ctx.fill();
+    ctx.fillStyle = left > .25 ? '#ff7ab0' : '#ff5a5a'; if (left > 0) { rr(54, 601, Math.max(12, (W - 64) * left), 12, 6); ctx.fill(); }
+    if (state === 'draw' && !stroke) text('線を描こう!指を離すと水が出るよ', W / 2, 66, 12, '#cde', 'center', false);
+    const by = 636, bh = 50;
+    btn(8, by, 120, bh, '↻ やり直し', retry, { size: 14 });
+    btn(272, by, 120, bh, '💡ヒント', () => { showHint = !showHint; sfx.ui(); }, { primary: true, size: 16, disabled: state !== 'draw' });
+    text(lv.name, 200, by + 25, 12, '#9ab', 'center', false);
+  }
+  ctx.fillStyle = 'rgba(8,10,30,.85)'; ctx.fillRect(0, 0, W, 50);
+  text('STAGE ' + stage + ' / ' + MAX_STAGE, W / 2, 18, 18, '#fff', 'center');
+  if (state !== 'title') text('カップに ' + L().need + '滴 入れよう  (いま ' + inCup + ')', W / 2, 38, 11, '#9ab', 'center', false);
+  text('BEST ' + best, 10, 25, 11, '#9ab', 'left', false);
+  btn(W - 46, 8, 38, 34, muted ? '🔇' : '🔊', () => { muted = !muted; lsSet('dripMute', muted ? '1' : '0'); }, { size: 16 });
+
+  if (state === 'title') {
+    panel('DRIP LINE', ['線を描いて、水をカップへ導こう!', '', '指でなぞった線はそのまま物体になって落ちる', '板や釘、カップのふちに引っかけて使おう', '指を離すと蛇口から水が出る', 'インクを節約すると ★3'].concat(hasMatter ? [] : ['', '⚠ 物理エンジンを読み込めませんでした(通信を確認)']));
+    btn(40, 470, 54, 54, '◀', () => { if (stage > 1) { stage--; sfx.ui(); } }, { size: 20, disabled: stage <= 1 });
+    text('STAGE ' + stage, 147, 497, 16, '#fff', 'center');
+    btn(200, 470, 54, 54, '▶', () => { if (stage < Math.min(MAX_STAGE, best + 1)) { stage++; sfx.ui(); } }, { size: 20, disabled: stage >= Math.min(MAX_STAGE, best + 1) });
+    btn(266, 462, 110, 70, 'START', start, { primary: true, size: 20, disabled: !hasMatter });
+  } else if (state === 'clear' && clearT > 40) {
+    const st = stars();
+    panel('CLEAR!', ['STAGE ' + stage + '  インク ' + Math.round(inkUsed / L().ink * 100) + '% 使用']);
+    text('★'.repeat(st) + '☆'.repeat(3 - st), W / 2, 330, 40, '#ffd23f', 'center');
+    btn(40, 430, 140, 56, 'もう一度', retry);
+    if (stage < MAX_STAGE) btn(220, 430, 140, 56, '次へ ▶', nextStage, { primary: true, size: 18 });
+    else text('全ステージクリア!', 290, 458, 14, '#9dffb8', 'center');
+  } else if (state === 'fail' && clearT > 30) {
+    panel('ざんねん…', ['カップに ' + inCup + ' / ' + L().need + ' 滴', '', '💡ヒントで線の例が見られるよ']);
+    btn(220, 430, 140, 56, '↻ やり直し', retry, { primary: true, size: 18 });
+  }
+}
+function panel(title, lines) {
+  ctx.fillStyle = 'rgba(5,6,15,.82)'; ctx.fillRect(0, 50, W, 575);
+  text(title, W / 2, 190, 38, '#ffe27a', 'center');
+  lines.forEach((l, i) => text(l, W / 2, 250 + i * 26, 13, '#cde', 'center', false));
+}
+
+// ======================= 入力 =======================
+function pos(e) { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height }; }
+function addPoint(p) {
+  if (!stroke || stroke.blocked) return;
+  const pts = stroke.pts, lv = L();
+  if (!pts.length) { if (!blockedAt(p)) pts.push(p); return; }
+  const a = pts[pts.length - 1], d = Math.hypot(p.x - a.x, p.y - a.y);
+  if (d < 12) return;
+  // 途中の点も含めて障害物に入ったら、そこで線を止める
+  const n = Math.ceil(d / 4);
+  for (let k = 1; k <= n; k++) {
+    const q = { x: a.x + (p.x - a.x) * k / n, y: a.y + (p.y - a.y) * k / n };
+    if (blockedAt(q)) { stroke.blocked = true; return; }
+  }
+  if (inkUsed + d > lv.ink) { stroke.blocked = true; return; }
+  inkUsed += d; pts.push(p);
+}
+cv.addEventListener('pointerdown', e => {
+  initAudio();
+  const p = pos(e);
+  for (let i = buttons.length - 1; i >= 0; i--) { const b = buttons[i]; if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) { b.fn(); return; } }
+  if (state !== 'draw' || p.y > 622) return;
+  stroke = { pts: [], blocked: false }; inkUsed = 0; addPoint(p);
+  try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+});
+cv.addEventListener('pointermove', e => { if (stroke) addPoint(pos(e)); });
+cv.addEventListener('pointerup', () => { if (stroke) finishStroke(); });
+cv.addEventListener('pointercancel', () => { stroke = null; inkUsed = 0; });
+addEventListener('keydown', e => {
+  initAudio();
+  const k = e.key.toLowerCase();
+  if (k === 'enter') { if (state === 'title' && hasMatter) start(); else if (state === 'clear') nextStage(); else if (state === 'fail') retry(); }
+  else if (k === 'r' && state !== 'title') retry();
+  else if (k === 'h' && state === 'draw') showHint = !showHint;
+  else if (k === 'm') { muted = !muted; lsSet('dripMute', muted ? '1' : '0'); }
+});
+
+// ======================= ループ =======================
+let last = 0, acc = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  acc += Math.min(.1, (t - last) / 1000); last = t;
+  let n = 0;
+  while (acc >= STEP && n < 4) { update(); acc -= STEP; n++; }
+  if (n === 4) acc = 0;
+  draw();
+}
+requestAnimationFrame(t => { last = t; frame(t); });
+// テスト用: 想定解の線を描いて結果をシミュレーションする
+window.__game = {
+  get state() { return state; }, LEVELS, set stage(v) { stage = v; }, tune(v, f, a) { VMAX = v; DF = f; DA = a; },
+  run(i, pts, maxSteps) {
+    stage = i; loadStage(); state = 'draw';
+    stroke = { pts: [], blocked: false }; inkUsed = 0;
+    const P = (pts || LEVELS[i - 1].sol).map(([x, y]) => ({ x, y }));
+    addPoint(P[0]);
+    for (let k = 1; k < P.length; k++) { const a = P[k - 1], b = P[k], n = Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 6); for (let j = 1; j <= n; j++) addPoint({ x: a.x + (b.x - a.x) * j / n, y: a.y + (b.y - a.y) * j / n }); }
+    const blocked = stroke.blocked, ink = Math.round(inkUsed);
+    finishStroke();
+    for (let k = 0; k < (maxSteps || 60 * 18) && state === 'flow'; k++) update();
+    return { state, inCup, need: LEVELS[i - 1].need, blocked, ink, max: LEVELS[i - 1].ink, line: line && { x: Math.round(line.body.position.x), y: Math.round(line.body.position.y), a: +line.body.angle.toFixed(2) } };
+  },
+};
+</script>
+<script src="../assets/back-button.js"></script>
+</body>
+</html>
