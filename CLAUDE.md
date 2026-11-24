@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `index.html` — ポータル(カード一覧、星空、ワープ遷移)。ゲームを追加したらここにカードを足す。
   ハイスコアは各ゲームが `localStorage` に保存し、ポータルが `data-hi` の key で読んでバッジ表示する
   (`suikaHi` / `lr_stage_best` / `spaceShooterHi` / `taikoHi` / `doodleDone` / `bubbleHi` /
-  `tubesBest` / `parkingBest` / `tangleBest` / `dripBest` / `pinBest` / `hopBest` / `pinballBest`)。key を変えるとバッジが壊れる。
+  `tubesBest` / `parkingBest` / `tangleBest` / `dripBest` / `pinBest` / `hopBest` / `pinballBest` / `jellyBest`)。key を変えるとバッジが壊れる。
 - `assets/back-button.js` — 全ゲーム共通の「← トップへ」ボタン(各ゲームの `</body>` 前で読み込む)。
   `position:fixed` で左上に出るので、**ゲーム側のUIと重ならない余白を確保する**こと。
 - ゲーム: `suika/`(Planet Merge、Matter.js を CDN から読込) / `car/`(ラインロード) / `space/`(Space Shooter) /
@@ -24,7 +24,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   `drip/`(Drip Line、線を描いて水をカップへ。Matter.js) / `pin/`(Pin Flow、ピン抜き。粒子シミュレーション自作)。
   `hop/`(Orbit Hop、軌道を回る点を接線方向へ発射して次の惑星へ。固定刻み `STEP=1/120`、`__game.auto()` で先読み自動プレイ)。
   `pinball/`(Galaxy Pinball、円と線分の衝突を自作した物理。`STEP=1/480`、`__game.mash()` で連打テスト。`pin/` とは別物)。
-  パズル5本と hop / pinball は仕様を各 `REQUIREMENTS.md` に書いてある
+  `jelly/`(Jelly Chain、同色4つ以上をつなげて消す6×12の連鎖パズル。ぷよぷよ系だが商標のため名前は別。`__game.resolve()` で連鎖の得点を検証)。
+  パズル5本と hop / pinball / jelly は仕様を各 `REQUIREMENTS.md` に書いてある
 - `assets/audio-unlock.js` — スマホで音を出す共通対策(iOS は touchend/click で resume が必要、マナースイッチ対策)。音を出すゲームは `<head>` で読み込む。
 - 音は基本 Web Audio で合成。例外は `dance/songs/*.mp3`(FreePD.com の CC0/Public Domain 曲)。音源を足す場合は出典・ライセンスを README に書く。
 
