@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Orbit Hop - 軌道ジャンプ</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none; background: #05060f; color: #cde; font-family: monospace; }
+  body { height: 100dvh; padding: 44px 6px 4px; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  canvas { background: #000; border: 2px solid #335; aspect-ratio: 400 / 700; height: auto;
+           width: min(100%, calc((100dvh - 44px - 30px) * 0.5714)); touch-action: none; }
+  p { margin: 4px; font-size: 11px; line-height: 1.4; opacity: .8; text-align: center; }
+  @media (max-width: 700px) { p.pc { display: none; } }
+</style>
+<script src="../assets/audio-unlock.js"></script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<p class="pc">クリック / スペース: 発射 　Enter: スタート/もう一度</p>
+<script>
+// Orbit Hop: 惑星の軌道を回る点をタップで接線方向へ発射し、次の惑星の軌道に乗り移る。仕様は REQUIREMENTS.md
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = 400, H = 700, DPR = Math.min(2, window.devicePixelRatio || 1), STEP = 1 / 120;
+cv.width = W * DPR; cv.height = H * DPR;
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+const KEY_BEST = 'hopBest';
+let best = parseInt(lsGet(KEY_BEST), 10) || 0;
+
+// ---- 音 ----
+let actx = null;
+function initAudio() {
+  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (actx && actx.state === 'suspended' && actx.resume) actx.resume();
+}
+function tone(f, d, type, v, slide) {
+  if (!actx) return;
+  const t = actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || 'sine'; o.frequency.setValueAtTime(f, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, f + slide), t + d);
+  g.gain.setValueAtTime(v || 0.07, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + d);
+}
+
+// ---- 乱数 (seed指定可。テストで再現できる) ----
+let seed = 1;
+function rnd() { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }
+const COLORS = ['#4a8ae0', '#e0a040', '#c050e0', '#40c8a0', '#ff6fc0', '#ff8a30', '#3ac8e0'];
+
+// ---- 状態 ----
+let state = 'title';            // title / play / over
+let planets, pl, camY, score, tick, trail, flash;
+
+function addPlanet() {
+  const p = planets[planets.length - 1], i = planets.length;
+  const r = 38 + rnd() * 26;
+  let x = 75 + rnd() * 250;
+  x = Math.max(75, Math.min(325, Math.max(p.x - 190, Math.min(p.x + 190, x))));
+  planets.push({ x, y: p.y - (150 + rnd() * 60), r, c: COLORS[i % COLORS.length] });
+}
+function speed() { return 190 + Math.min(150, score * 4); }
+function reset(sd) {
+  seed = sd == null ? (Math.random() * 1e9) | 0 : sd;
+  planets = [{ x: 200, y: 560, r: 58, c: COLORS[0] }];
+  while (planets.length < 8) addPlanet();
+  score = 0; tick = 0; trail = []; flash = 0;
+  pl = { cur: 0, last: -1, max: 0, ang: Math.PI / 2, dir: 1, fly: false, x: 200, y: 560 + 58, vx: 0, vy: 0, t: 0 };
+  camY = planets[0].y - 470;
+}
+function start(sd) { reset(sd); state = 'play'; }
+
+function launch() {
+  if (state !== 'play' || pl.fly) return;
+  const s = speed();
+  pl.vx = -Math.sin(pl.ang) * pl.dir * s; pl.vy = Math.cos(pl.ang) * pl.dir * s;
+  pl.fly = true; pl.t = 0; pl.last = pl.cur;
+  tone(520, .12, 'triangle', .06, 400);
+}
+function die() {
+  state = 'over'; flash = 1;
+  if (score > best) { best = score; lsSet(KEY_BEST, String(best)); }
+  tone(300, .5, 'sawtooth', .07, -240);
+}
+
+function update() {
+  if (state !== 'play') return;
+  tick++;
+  if (flash > 0) flash = Math.max(0, flash - STEP * 3);
+  if (!pl.fly) {
+    const P = planets[pl.cur];
+    pl.ang += pl.dir * (speed() / P.r) * STEP;
+    pl.x = P.x + Math.cos(pl.ang) * P.r; pl.y = P.y + Math.sin(pl.ang) * P.r;
+  } else {
+    pl.x += pl.vx * STEP; pl.y += pl.vy * STEP; pl.t += STEP;
+    for (let i = 0; i < planets.length; i++) {
+      if (i === pl.last) continue;
+      const P = planets[i], dx = pl.x - P.x, dy = pl.y - P.y;
+      if (dx * dx + dy * dy <= P.r * P.r) {                    // 軌道の輪に入ったら捕獲
+        pl.cur = i; pl.fly = false; pl.ang = Math.atan2(dy, dx);
+        pl.dir = (dx * pl.vy - dy * pl.vx) >= 0 ? 1 : -1;
+        if (i > pl.max) { pl.max = i; score++; flash = 1; tone(660 + Math.min(score, 20) * 20, .15, 'sine', .07);
+          while (planets.length < pl.max + 8) addPlanet(); }
+        else tone(440, .08, 'sine', .05);
+        break;
+      }
+    }
+    if (pl.fly && (pl.y > camY + H + 20 || pl.x < -30 || pl.x > W + 30 || pl.t > 4)) die();
+  }
+  trail.push({ x: pl.x, y: pl.y }); if (trail.length > 14) trail.shift();
+  const ty = planets[pl.cur].y - 470; if (ty < camY) camY += (ty - camY) * Math.min(1, 4 * STEP);
+}
+
+// ---- 描画 ----
+const stars = Array.from({ length: 70 }, (_, i) => ({ x: (i * 97) % W, y: (i * 233) % H, z: 0.2 + (i % 5) * 0.12 }));
+const btns = [];
+function btn(x, y, w, h, label, fn) {
+  ctx.fillStyle = '#ff8a30'; ctx.beginPath(); ctx.roundRect(x, y, w, h, 14); ctx.fill();
+  ctx.fillStyle = '#210'; ctx.font = 'bold 22px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + w / 2, y + h / 2 + 1);
+  btns.push({ x, y, w, h, fn });
+}
+function draw() {
+  btns.length = 0;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = '#05060f'; ctx.fillRect(0, 0, W, H);
+  for (const s of stars) {
+    const y = (((s.y - camY * s.z) % H) + H) % H;
+    ctx.fillStyle = 'rgba(200,220,255,' + (0.3 + s.z) + ')'; ctx.fillRect(s.x, y, 1.5, 1.5);
+  }
+  ctx.save(); ctx.translate(0, -camY);
+  planets.forEach((P, i) => {
+    const active = state === 'play' && i === pl.cur;
+    ctx.strokeStyle = P.c; ctx.globalAlpha = active ? 0.9 : 0.35; ctx.lineWidth = active ? 2.5 : 1.5;
+    ctx.setLineDash([6, 6]); ctx.beginPath(); ctx.arc(P.x, P.y, P.r, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+    const g = ctx.createRadialGradient(P.x - 5, P.y - 5, 1, P.x, P.y, 14);
+    g.addColorStop(0, '#fff'); g.addColorStop(0.4, P.c); g.addColorStop(1, '#000');
+    ctx.fillStyle = g; ctx.shadowColor = P.c; ctx.shadowBlur = 16;
+    ctx.beginPath(); ctx.arc(P.x, P.y, 12, 0, 7); ctx.fill(); ctx.shadowBlur = 0;
+  });
+  if (state !== 'title') {
+    trail.forEach((t, i) => { ctx.fillStyle = 'rgba(255,255,255,' + (i / trail.length * 0.5) + ')'; ctx.beginPath(); ctx.arc(t.x, t.y, 2 + i / 5, 0, 7); ctx.fill(); });
+    ctx.fillStyle = '#fff'; ctx.shadowColor = '#fff'; ctx.shadowBlur = 14;
+    ctx.beginPath(); ctx.arc(pl.x, pl.y, 7, 0, 7); ctx.fill(); ctx.shadowBlur = 0;
+  }
+  ctx.restore();
+  ctx.textBaseline = 'alphabetic';
+  if (state === 'play' || state === 'over') {
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = 'bold ' + (40 + flash * 8) + 'px monospace';
+    ctx.fillText(score, W / 2, 64);
+    ctx.font = '12px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = '#9ab';
+    ctx.fillText('BEST ' + best, W - 12, 24);                  // 左上は「← トップへ」ボタン用に空ける
+  }
+  if (state === 'title') {
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.shadowColor = '#5af'; ctx.shadowBlur = 14;
+    ctx.font = 'bold 40px monospace'; ctx.fillText('ORBIT HOP', W / 2, 150); ctx.shadowBlur = 0;
+    ctx.font = '14px monospace'; ctx.fillStyle = '#9ab';
+    ctx.fillText('惑星のまわりを回る点を', W / 2, 190);
+    ctx.fillText('タップで発射して次の軌道へ!', W / 2, 212);
+    ctx.fillText('外すと宇宙の彼方へ…', W / 2, 234);
+    if (best) ctx.fillText('BEST ' + best, W / 2, 270);
+    btn(210, 600, 170, 56, 'START', () => start());
+  }
+  if (state === 'over') {
+    ctx.fillStyle = 'rgba(0,0,10,.6)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = 'bold 30px monospace'; ctx.fillText('GAME OVER', W / 2, 260);
+    ctx.font = '18px monospace'; ctx.fillText('SCORE ' + score, W / 2, 304);
+    ctx.fillStyle = score >= best && score > 0 ? '#ffd060' : '#9ab';
+    ctx.fillText(score >= best && score > 0 ? 'NEW BEST!' : 'BEST ' + best, W / 2, 334);
+    btn(210, 600, 170, 56, 'RETRY', () => start());
+  }
+}
+
+// ---- 入力 ----
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault(); initAudio();
+  const r = cv.getBoundingClientRect(), x = (e.clientX - r.left) * W / r.width, y = (e.clientY - r.top) * H / r.height;
+  if (state === 'play') { launch(); return; }
+  for (const b of btns) if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.fn(); return; }
+});
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'Enter') {
+    e.preventDefault(); initAudio();
+    if (state === 'play') { if (e.code === 'Space') launch(); } else start();
+  }
+});
+let last = 0, acc = 0;
+function frame(t) {
+  const dt = Math.min(0.1, (t - last) / 1000 || 0); last = t; acc += dt;
+  while (acc >= STEP) { update(); acc -= STEP; }
+  draw(); requestAnimationFrame(frame);
+}
+reset(1); requestAnimationFrame(frame);
+
+// テスト用: 発射した場合の結果を先読みして、次の惑星に乗れる瞬間にだけ発射する自動プレイ
+window.__game = {
+  get state() { return state; }, get score() { return score; },
+  start, launch, step(n) { for (let i = 0; i < (n || 1); i++) update(); },
+  willHit() {                                    // いま発射したら新しい惑星に乗れるか
+    if (state !== 'play' || pl.fly) return false;
+    const s = speed(); let x = pl.x, y = pl.y, vx = -Math.sin(pl.ang) * pl.dir * s, vy = Math.cos(pl.ang) * pl.dir * s;
+    for (let k = 0; k < 4 / STEP; k++) {
+      x += vx * STEP; y += vy * STEP;
+      for (let i = 0; i < planets.length; i++) if (i !== pl.cur && (x - planets[i].x) ** 2 + (y - planets[i].y) ** 2 <= planets[i].r ** 2) return i === pl.max + 1;
+      if (y > camY + H + 20 || x < -30 || x > W + 30) return false;
+    }
+    return false;
+  },
+  auto(maxSteps) {                               // 先読みで自動プレイ。終了時のスコアを返す
+    for (let k = 0; k < (maxSteps || 120 * 60) && state === 'play'; k++) { if (!pl.fly && this.willHit()) launch(); update(); }
+    return { state, score };
+  },
+  blind(frames) { start(1); for (let k = 0; k < frames && state === 'play'; k++) update(); return { state, score }; },   // 何もしない
+  fling() { start(1); for (let k = 0; k < 60 * 120 && state === 'play'; k++) { if (!pl.fly && k % 90 === 0) launch(); update(); } return { state, score }; },  // 適当に連打
+};
+</script>
+<script src="../assets/back-button.js"></script>
+</body>
+</html>
