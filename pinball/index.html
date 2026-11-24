@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Galaxy Pinball - ピンボール</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none; background: #05060f; color: #cde; font-family: monospace; }
+  body { height: 100dvh; padding: 44px 6px 4px; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  canvas { background: #000; border: 2px solid #335; aspect-ratio: 400 / 700; height: auto;
+           width: min(100%, calc((100dvh - 44px - 30px) * 0.5714)); touch-action: none; }
+  p { margin: 4px; font-size: 11px; line-height: 1.4; opacity: .8; text-align: center; }
+  @media (max-width: 700px) { p.pc { display: none; } }
+</style>
+<script src="../assets/audio-unlock.js"></script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<p class="pc">Z / ← : 左フリッパー 　/ / → : 右フリッパー 　Space: 発射(長押しで強く) 　Enter: スタート</p>
+<script>
+// Galaxy Pinball: 物理は自作(円と線分の衝突)。仕様は REQUIREMENTS.md
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = 400, H = 700, DPR = Math.min(2, window.devicePixelRatio || 1), STEP = 1 / 480;
+cv.width = W * DPR; cv.height = H * DPR;
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+const KEY_BEST = 'pinballBest';
+let best = parseInt(lsGet(KEY_BEST), 10) || 0;
+
+// ---- 音 ----
+let actx = null;
+function initAudio() {
+  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (actx && actx.state === 'suspended' && actx.resume) actx.resume();
+}
+function tone(f, d, type, v, slide) {
+  if (!actx) return;
+  const t = actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || 'sine'; o.frequency.setValueAtTime(f, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, f + slide), t + d);
+  g.gain.setValueAtTime(v || 0.06, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + d);
+}
+
+// ---- テーブル定義 ----
+const R = 8, G = 800, MAXV = 1500;
+const segs = [];   // {a:[x,y], b:[x,y], e:反発, kick:加速, r:太さ}
+function seg(x1, y1, x2, y2, e, kick, r) { segs.push({ a: [x1, y1], b: [x2, y2], e: e == null ? 0.45 : e, kick: kick || 0, r: r || 0, hit: 0 }); }
+// 上のアーチ(中心 (200,200) 半径198)
+for (let i = 0; i < 28; i++) {
+  const t0 = Math.PI * i / 28, t1 = Math.PI * (i + 1) / 28;
+  seg(200 + 198 * Math.cos(t0), 200 - 198 * Math.sin(t0), 200 + 198 * Math.cos(t1), 200 - 198 * Math.sin(t1), 0.35);
+}
+seg(398, 200, 398, 672); seg(2, 200, 2, 560);              // 外壁
+seg(368, 200, 368, 560); seg(368, 560, 258, 632);           // 右の内壁とガイド
+seg(2, 560, 112, 632);                                      // 左ガイド
+seg(368, 672, 398, 672);                                    // 発射レーンの床
+seg(368, 560, 368, 672);                                    // レーン内壁の下側
+// スリングショット(当たると蹴り返す)
+seg(48, 470, 96, 556, 0.5, 260, 3); seg(322, 470, 274, 556, 0.5, 260, 3);
+const bumpers = [{ x: 120, y: 250, r: 24, hit: 0 }, { x: 250, y: 220, r: 24, hit: 0 }, { x: 185, y: 335, r: 24, hit: 0 }, { x: 70, y: 360, r: 14, hit: 0 }, { x: 300, y: 370, r: 14, hit: 0 }];
+const FL = 62, FANG = 0.52, FSPD = 24;
+const flippers = [
+  { px: 120, py: 640, sgn: 1, a: FANG, on: false },        // 左: 右向きに伸びる
+  { px: 250, py: 640, sgn: -1, a: FANG, on: false },       // 右: 左向きに伸びる
+];
+function tip(f) { return [f.px + f.sgn * FL * Math.cos(f.a), f.py + FL * Math.sin(f.a)]; }
+
+// ---- 状態 ----
+let state = 'title', score, lives, ball, charge, charging, still, flash, seed = 1;
+function rnd() { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }
+function newBall() { ball = { x: 383, y: 660, vx: 0, vy: 0 }; charge = 0; charging = false; still = 0; }
+function start() { score = 0; lives = 3; flash = 0; newBall(); state = 'play'; }
+function inLane() { return ball.x > 369 && ball.y > 300; }
+
+function release() {
+  if (!charging) return; charging = false;
+  if (state === 'play' && inLane() && Math.abs(ball.vy) < 30) {
+    ball.vy = -(960 + 340 * Math.min(1, charge)); ball.vx = 0; tone(200, .2, 'square', .05, 500);
+  }
+  charge = 0;
+}
+
+function collideSeg(s, vsurf) {
+  const ax = s.a[0], ay = s.a[1], bx = s.b[0], by = s.b[1], dx = bx - ax, dy = by - ay;
+  let t = ((ball.x - ax) * dx + (ball.y - ay) * dy) / (dx * dx + dy * dy); t = Math.max(0, Math.min(1, t));
+  const cx = ax + dx * t, cy = ay + dy * t, ex = ball.x - cx, ey = ball.y - cy, d2 = ex * ex + ey * ey, rr = R + s.r;
+  if (d2 >= rr * rr) return false;
+  const d = Math.sqrt(d2) || 1e-6, nx = ex / d, ny = ey / d;
+  ball.x = cx + nx * rr; ball.y = cy + ny * rr;
+  const sv = vsurf ? vsurf(cx, cy) : [0, 0];
+  const rvx = ball.vx - sv[0], rvy = ball.vy - sv[1], vn = rvx * nx + rvy * ny;
+  if (vn < 0) {
+    ball.vx = sv[0] + rvx - (1 + s.e) * vn * nx; ball.vy = sv[1] + rvy - (1 + s.e) * vn * ny;
+    if (s.kick) { ball.vx += nx * s.kick; ball.vy += ny * s.kick; s.hit = 1; score += 10; tone(300, .08, 'square', .04, 200); }
+  }
+  return true;
+}
+
+function update() {
+  if (state !== 'play') return;
+  for (const f of flippers) {                                // フリッパーの回転
+    const target = f.on ? -FANG : FANG, da = Math.max(-FSPD * STEP, Math.min(FSPD * STEP, target - f.a));
+    f.da = da / STEP; f.a += da;
+  }
+  if (charging) charge = Math.min(1, charge + STEP / 0.9);
+  ball.vy += G * STEP;
+  const sp = Math.hypot(ball.vx, ball.vy); if (sp > MAXV) { ball.vx *= MAXV / sp; ball.vy *= MAXV / sp; }
+  ball.x += ball.vx * STEP; ball.y += ball.vy * STEP;
+  for (const s of segs) collideSeg(s);
+  for (const f of flippers) {
+    const t = tip(f), c = { a: [f.px, f.py], b: t, e: 0.3, kick: 0, r: 5 };
+    collideSeg(c, (cx, cy) => {                              // 接触点の面速度 = 角速度 × 回転軸からの距離
+      const s = Math.hypot(cx - f.px, cy - f.py), w = f.da || 0;
+      return f.sgn === 1 ? [-Math.sin(f.a) * s * w, Math.cos(f.a) * s * w] : [Math.sin(f.a) * s * w, Math.cos(f.a) * s * w];
+    });
+  }
+  for (const b of bumpers) {
+    const dx = ball.x - b.x, dy = ball.y - b.y, rr = R + b.r, d2 = dx * dx + dy * dy;
+    if (d2 < rr * rr) {
+      const d = Math.sqrt(d2) || 1e-6, nx = dx / d, ny = dy / d;
+      ball.x = b.x + nx * rr; ball.y = b.y + ny * rr;
+      const vn = ball.vx * nx + ball.vy * ny;
+      if (vn < 0) ball.vx -= 1.6 * vn * nx, ball.vy -= 1.6 * vn * ny;
+      ball.vx += nx * 260; ball.vy += ny * 260;
+      b.hit = 1; score += 100; flash = 1; tone(500 + (b.r < 20 ? 200 : 0), .1, 'triangle', .07, 300);
+    }
+  }
+  for (const s of segs) if (s.hit > 0) s.hit = Math.max(0, s.hit - STEP * 6);
+  for (const b of bumpers) if (b.hit > 0) b.hit = Math.max(0, b.hit - STEP * 5);
+  if (flash > 0) flash = Math.max(0, flash - STEP * 4);
+  // 止まってしまったら軽く揺らす
+  if (!inLane() && Math.hypot(ball.vx, ball.vy) < 12) { still += STEP; if (still > 2) { ball.vx += (rnd() - .5) * 200; ball.vy -= 150; still = 0; } } else still = 0;
+  if (ball.y > H + 30 || ball.x < -30 || ball.x > W + 30 || ball.y < -50) {    // 落下(場外も含む)
+    tone(220, .4, 'sawtooth', .06, -160);
+    if (--lives <= 0) { state = 'over'; if (score > best) { best = score; lsSet(KEY_BEST, String(best)); } } else newBall();
+  }
+}
+
+// ---- 描画 ----
+const btns = [];
+function btn(x, y, w, h, label, fn) {
+  ctx.fillStyle = '#ffd060'; ctx.beginPath(); ctx.roundRect(x, y, w, h, 14); ctx.fill();
+  ctx.fillStyle = '#210'; ctx.font = 'bold 22px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + w / 2, y + h / 2 + 1); btns.push({ x, y, w, h, fn });
+}
+function draw() {
+  btns.length = 0;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = '#070a1c'; ctx.fillRect(0, 0, W, H);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const s of segs) {                                    // 壁
+    ctx.strokeStyle = s.kick ? (s.hit > 0 ? '#fff' : '#ff6fc0') : '#4a8ae0'; ctx.lineWidth = s.kick ? 6 : 3;
+    ctx.shadowColor = ctx.strokeStyle; ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.moveTo(s.a[0], s.a[1]); ctx.lineTo(s.b[0], s.b[1]); ctx.stroke();
+  }
+  ctx.shadowBlur = 0;
+  for (const b of bumpers) {
+    ctx.fillStyle = b.hit > 0 ? '#fff' : '#c050e0'; ctx.shadowColor = '#c050e0'; ctx.shadowBlur = 10 + b.hit * 20;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.fill();
+    ctx.shadowBlur = 0; ctx.fillStyle = '#2a0a3a'; ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 0.55, 0, 7); ctx.fill();
+  }
+  for (const f of flippers) {
+    const t = tip(f); ctx.strokeStyle = '#ff8a30'; ctx.shadowColor = '#ff8a30'; ctx.shadowBlur = 10; ctx.lineWidth = 12;
+    ctx.beginPath(); ctx.moveTo(f.px, f.py); ctx.lineTo(t[0], t[1]); ctx.stroke(); ctx.shadowBlur = 0;
+  }
+  if (state !== 'title') {
+    ctx.fillStyle = '#fff'; ctx.shadowColor = '#fff'; ctx.shadowBlur = 12;
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, R, 0, 7); ctx.fill(); ctx.shadowBlur = 0;
+    if (inLane() && ball.y > 600) {                          // プランジャーのチャージ表示
+      ctx.fillStyle = '#334'; ctx.fillRect(372, 560, 22, 100);
+      ctx.fillStyle = '#ffd060'; ctx.fillRect(372, 660 - 100 * charge, 22, 100 * charge);
+    }
+    ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
+    ctx.font = 'bold ' + (34 + flash * 6) + 'px monospace'; ctx.fillText(score, W / 2, 56);   // 左上は「← トップへ」用に空ける
+    ctx.font = '12px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = '#9ab';
+    ctx.fillText('BEST ' + best, W - 12, 18); ctx.fillText('●'.repeat(Math.max(0, lives)), W - 12, 36);
+    if (state === 'play' && inLane() && ball.y > 600 && !charging) {
+      ctx.textAlign = 'center'; ctx.fillStyle = '#9ab'; ctx.font = '13px monospace'; ctx.fillText('長押し→はなして発射', 200, 520);
+    }
+  }
+  ctx.textBaseline = 'alphabetic';
+  if (state === 'title' || state === 'over') {
+    ctx.fillStyle = 'rgba(0,0,10,.7)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+    if (state === 'title') {
+      ctx.shadowColor = '#5af'; ctx.shadowBlur = 14; ctx.font = 'bold 34px monospace'; ctx.fillText('GALAXY PINBALL', W / 2, 190); ctx.shadowBlur = 0;
+      ctx.font = '14px monospace'; ctx.fillStyle = '#9ab';
+      ctx.fillText('画面の左半分 = 左フリッパー', W / 2, 250); ctx.fillText('画面の右半分 = 右フリッパー', W / 2, 274);
+      ctx.fillText('右レーンで長押し→はなして発射', W / 2, 298); ctx.fillText('ボールは3つ', W / 2, 322);
+      if (best) ctx.fillText('BEST ' + best, W / 2, 366);
+      btn(210, 600, 170, 56, 'START', start);
+    } else {
+      ctx.font = 'bold 30px monospace'; ctx.fillText('GAME OVER', W / 2, 260);
+      ctx.font = '18px monospace'; ctx.fillText('SCORE ' + score, W / 2, 304);
+      ctx.fillStyle = score >= best && score > 0 ? '#ffd060' : '#9ab'; ctx.fillText(score >= best && score > 0 ? 'NEW BEST!' : 'BEST ' + best, W / 2, 334);
+      btn(210, 600, 170, 56, 'RETRY', start);
+    }
+  }
+}
+
+// ---- 入力 ----
+const ptrs = new Map();
+function applyPtrs() { flippers[0].on = flippers[1].on = false; for (const s of ptrs.values()) flippers[s].on = true; if (kb[0]) flippers[0].on = true; if (kb[1]) flippers[1].on = true; }
+const kb = [false, false];
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault(); initAudio();
+  const r = cv.getBoundingClientRect(), x = (e.clientX - r.left) * W / r.width, y = (e.clientY - r.top) * H / r.height;
+  if (state !== 'play') { for (const b of btns) if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.fn(); return; } return; }
+  if (inLane() && ball.y > 600) charging = true;
+  ptrs.set(e.pointerId, x < W / 2 ? 0 : 1); applyPtrs();
+  try { cv.setPointerCapture(e.pointerId); } catch (err) {}
+});
+function up(e) { ptrs.delete(e.pointerId); applyPtrs(); if (!ptrs.size) release(); }
+cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+window.addEventListener('keydown', e => {
+  if (e.repeat) return;
+  if (e.code === 'KeyZ' || e.code === 'ArrowLeft') { kb[0] = true; applyPtrs(); e.preventDefault(); }
+  else if (e.code === 'Slash' || e.code === 'ArrowRight') { kb[1] = true; applyPtrs(); e.preventDefault(); }
+  else if (e.code === 'Space') { e.preventDefault(); initAudio(); if (state === 'play') { if (inLane()) charging = true; } else start(); }
+  else if (e.code === 'Enter' && state !== 'play') { initAudio(); start(); }
+});
+window.addEventListener('keyup', e => {
+  if (e.code === 'KeyZ' || e.code === 'ArrowLeft') { kb[0] = false; applyPtrs(); }
+  else if (e.code === 'Slash' || e.code === 'ArrowRight') { kb[1] = false; applyPtrs(); }
+  else if (e.code === 'Space') release();
+});
+let last = 0, acc = 0;
+function frame(t) {
+  const dt = Math.min(0.05, (t - last) / 1000 || 0); last = t; acc += dt;
+  while (acc >= STEP) { update(); acc -= STEP; }
+  draw(); requestAnimationFrame(frame);
+}
+newBall(); score = 0; lives = 3; flash = 0;
+requestAnimationFrame(frame);
+
+// テスト用
+window.__game = {
+  get state() { return state; }, get score() { return score; }, get lives() { return lives; }, get ball() { return ball; },
+  start() { seed = 1; start(); }, step(n) { for (let i = 0; i < n; i++) update(); },
+  launch(power) { charging = true; charge = power == null ? 1 : power; release(); },
+  flip(l, r) { kb[0] = l; kb[1] = r; applyPtrs(); },
+  // フルパワーで発射し、プレイフィールドに出る(レーンを出て y<500)まで何秒かかるか。出なければ -1
+  launchTest(power) {
+    this.start(); this.launch(power); let t = 0;
+    for (let k = 0; k < 480 * 6; k++) { update(); if (ball.x < 360 && ball.y < 500) { t = k / 480; break; } }
+    return { t: t || -1, x: ball.x, y: ball.y };
+  },
+  // 時間いっぱいフリッパーを連打して遊ぶ。ボールが場外へ抜けない/NaNにならないか、得点が入るかを見る
+  mash(sec) {
+    this.start(); let bad = 0, relaunch = 0;
+    for (let k = 0; k < sec * 480 && state === 'play'; k++) {
+      if (k % 120 === 0) { kb[0] = (k / 120 | 0) % 2 === 0; kb[1] = (k / 120 | 0) % 3 !== 0; applyPtrs(); }
+      if (inLane() && Math.abs(ball.vy) < 30 && ball.y > 600) { this.launch(0.6 + rnd() * .4); relaunch++; }
+      update();
+      if (!isFinite(ball.x + ball.y)) bad++;
+    }
+    kb[0] = kb[1] = false; applyPtrs();
+    return { state, score, lives, bad, relaunch };
+  },
+};
+</script>
+<script src="../assets/back-button.js"></script>
+</body>
+</html>
