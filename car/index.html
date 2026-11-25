@@ -65,6 +65,7 @@ const CARS = [
   { name: 'スポーツ', maxv: 230, accel: 700, mass: 0.7, jump: 430, body: '#2f80ed', roof: '#cfe3ff', st: [5, 3, 1, 3], desc: '速くて軽い。押し合いや風に弱い' },
   { name: 'トラック', maxv: 170, accel: 800, mass: 2.2, jump: 380, body: '#f2a100', roof: '#ffe9b0', st: [1, 4, 5, 2], desc: '重くて遅い。押し合いと風に強く、坂に強い' },
   { name: 'バギー', maxv: 200, accel: 850, mass: 1, jump: 500, body: '#43a047', roof: '#d4efd6', st: [3, 4, 3, 5], desc: '登坂とジャンプが得意。ぴょんぴょん跳ねる' },
+  { name: 'マグマ', maxv: 200, accel: 780, mass: 1.4, jump: 430, body: '#2a1a16', roof: '#ff8a1f', st: [3, 4, 4, 3], desc: '溶岩の車体。重めで加速が良い。割れ目が赤く脈打つ' },
 ];
 const TIRES = [
   { name: '標準', r: 20, vmul: 1, amul: 1, ice: false, desc: 'ふつうのタイヤ' },
@@ -72,6 +73,7 @@ const TIRES = [
   { name: 'スパイク', r: 20, vmul: 1, amul: 0.9, ice: true, desc: '鋲つき。氷の上でも進める。少し加速が弱い' },
   { name: 'スリック', r: 20, vmul: 1.1, amul: 0.7, ice: false, desc: 'つるつる。最高速は上がるが加速が弱い' },
   { name: '炎', r: 20, vmul: 1.05, amul: 1.2, ice: false, desc: '燃えるタイヤ。加速が強く、最高速も少し上がる' },
+  { name: 'マグマ', r: 20, vmul: 1.03, amul: 1.1, ice: false, desc: '溶岩のタイヤ。ドロドロに光りながら回る' },
 ];
 let carSel = 0, tireSel = 0, LD = { maxv: 200, accel: 700, mass: 1, jump: 430, r: 20, ice: false };
 try { carSel = Math.min(CARS.length - 1, Math.max(0, +localStorage.getItem('lr_car') || 0)); tireSel = Math.min(TIRES.length - 1, Math.max(0, +localStorage.getItem('lr_tire') || 0)); } catch (e) {}
@@ -733,7 +735,7 @@ function sfxDraw(kind) {
 function engineStart() {
   if (!AC || eng) return;
   eng = AC.createOscillator(); engGain = AC.createGain();
-  eng.type = ['sawtooth', 'sawtooth', 'square', 'triangle'][carSel]; eng.frequency.value = 60; engGain.gain.value = 0.0;
+  eng.type = ['sawtooth', 'sawtooth', 'square', 'triangle', 'sawtooth'][carSel]; eng.frequency.value = 60; engGain.gain.value = 0.0;
   const f = AC.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 500;
   eng.connect(f); f.connect(engGain); engGain.connect(master); eng.start();
 }
@@ -745,7 +747,7 @@ function engineStop() {
 function engineUpdate() {
   if (!eng) return;
   const sp = Math.hypot(car.vx, car.vy), t = AC.currentTime;
-  eng.frequency.setTargetAtTime((55 + sp * 0.35) * [1, 1.5, 0.6, 1.25][carSel], t, 0.05);
+  eng.frequency.setTargetAtTime((55 + sp * 0.35) * [1, 1.5, 0.6, 1.25, 0.8][carSel], t, 0.05);
   engGain.gain.setTargetAtTime(car.contact ? 0.10 : 0.04, t, 0.05);
 }
 function sfxClear() { [523, 659, 784, 1046].forEach((f, i) => tone(f, f, 0.18, 'square', 0.22, i * 0.12)); }
@@ -1111,7 +1113,7 @@ function update(dt) {
 
 // ---- 描画 ----
 // ---- 車の絵(車ごとに形が違う。プレビューでも使う) ----
-const WHEELX = [[-15, 15], [-21, 21], [-25, 22], [-23, 23]];
+const WHEELX = [[-15, 15], [-21, 21], [-25, 22], [-23, 23], [-18, 18]];
 function drawWheel(g, wx, yw, tw, ti, spin) {
   g.save(); g.translate(wx, yw); g.rotate(spin);
   g.fillStyle = '#1b1b1b'; g.beginPath(); g.arc(0, 0, tw, 0, 7); g.fill();
@@ -1129,11 +1131,25 @@ function drawWheel(g, wx, yw, tw, ti, spin) {
     g.fillStyle = '#ffd23a'; g.beginPath(); g.arc(0, 0, tw * 0.38, 0, 7); g.fill();
     g.fillStyle = '#fff6c0'; g.beginPath(); g.arc(0, 0, tw * 0.16, 0, 7); g.fill();
     g.strokeStyle = '#ff7a1a'; g.lineWidth = 2; g.beginPath(); g.arc(0, 0, tw - 1, 0, 7); g.stroke();
+  } else if (ti === 5) { // マグマ: 黒い岩のタイヤに溶岩の割れ目、中心は白熱
+    const pu = 0.5 + 0.5 * Math.sin(performance.now() / 260);
+    g.fillStyle = '#2b1a14'; g.beginPath(); g.arc(0, 0, tw, 0, 7); g.fill();
+    g.strokeStyle = pu > 0.5 ? '#ff9a2a' : '#ff6a1a'; g.lineWidth = 2; g.lineCap = 'round';
+    for (let k = 0; k < 6; k++) { g.rotate(Math.PI / 3); g.beginPath(); g.moveTo(tw * 0.35, 0); g.lineTo(tw * 0.62, tw * 0.12); g.lineTo(tw * 0.9, -tw * 0.05); g.stroke(); }
+    g.fillStyle = '#ff5a1a'; g.beginPath(); g.arc(0, 0, tw * 0.45, 0, 7); g.fill();
+    g.fillStyle = '#ffc94a'; g.beginPath(); g.arc(0, 0, tw * 0.28, 0, 7); g.fill();
+    g.fillStyle = '#fff3b0'; g.beginPath(); g.arc(0, 0, tw * 0.1, 0, 7); g.fill();
   } else {
     g.fillStyle = '#9a9a9a'; g.beginPath(); g.arc(0, 0, tw * 0.45, 0, 7); g.fill(); g.fillStyle = '#555';
     for (let k = 0; k < 5; k++) { g.rotate(Math.PI * 2 / 5); g.beginPath(); g.arc(tw * 0.25, 0, 1.6, 0, 7); g.fill(); }
   }
   g.restore();
+  if (ti === 5) { // マグマ: タイヤの外周に光る溶岩のしずく
+    const tm = performance.now() / 1000;
+    g.save(); g.translate(wx, yw); g.shadowColor = '#ff6a1a'; g.shadowBlur = 8;
+    for (let k = 0; k < 4; k++) { const ph = (tm * 1.2 + k * .25) % 1; g.fillStyle = `rgba(255,${120 + k * 30},30,${1 - ph})`; g.beginPath(); g.arc(Math.sin(k * 2.3) * tw * 0.8, tw * 0.6 + ph * 9, 2.2 * (1 - ph) + .5, 0, 7); g.fill(); }
+    g.restore();
+  }
   if (ti === 4) { // 炎はタイヤの回転に関係なく上へ揺れる
     const tm = performance.now() / 1000;
     g.save(); g.translate(wx, yw);
@@ -1169,6 +1185,16 @@ function drawCarSprite(g, ci, ti, r, tt, spin, fast) {
     g.fillStyle = cs.roof; g.fillRect(-4, yb - 15, 9, 8);
     g.strokeStyle = '#555'; g.lineWidth = 2; g.beginPath(); g.moveTo(30, yb - 3); g.lineTo(38, yb - 5); g.moveTo(-26, yb - 3); g.lineTo(-33, yb - 9); g.stroke();
     g.strokeStyle = '#9aa'; g.lineWidth = 2; for (const x of wx) { g.beginPath(); g.moveTo(x, yb - 4); g.lineTo(x, yw); g.stroke(); }
+  } else if (ci === 4) { // マグマ: 黒い岩の車体に溶岩の割れ目と脈打つ光
+    const pu = 0.5 + 0.5 * Math.sin(tt * 4);
+    g.save(); g.shadowColor = '#ff5a1a'; g.shadowBlur = 6 + 8 * pu;
+    g.fillStyle = cs.body; g.beginPath(); g.moveTo(-29, yb); g.lineTo(-31, yb - 12); g.lineTo(-18, yb - 17); g.lineTo(-10, yb - 27); g.lineTo(12, yb - 27); g.lineTo(20, yb - 17); g.lineTo(31, yb - 14); g.lineTo(30, yb); g.closePath(); g.fill();
+    g.restore();
+    g.fillStyle = `rgb(255,${110 + 60 * pu | 0},30)`; g.beginPath(); g.moveTo(-8, yb - 17); g.lineTo(-4, yb - 24); g.lineTo(10, yb - 24); g.lineTo(15, yb - 17); g.closePath(); g.fill();
+    g.strokeStyle = `rgb(255,${100 + 80 * pu | 0},20)`; g.lineWidth = 2; g.lineJoin = 'round'; g.beginPath();
+    g.moveTo(-28, yb - 5); g.lineTo(-19, yb - 9); g.lineTo(-12, yb - 4); g.lineTo(-3, yb - 10); g.lineTo(6, yb - 5); g.lineTo(16, yb - 10); g.lineTo(28, yb - 5); g.stroke();
+    g.fillStyle = '#ffb347'; for (let k = 0; k < 3; k++) { const ph = (tt * 0.9 + k * .33) % 1; g.globalAlpha = 1 - ph; g.beginPath(); g.arc(-14 + k * 14 + Math.sin(tt * 3 + k) * 2, yb - 27 - ph * 14, 2.4 * (1 - ph) + .6, 0, 7); g.fill(); }
+    g.globalAlpha = 1;
   } else { // 標準: セダン
     g.fillStyle = cs.body; g.fillRect(-27, yb - 16, 54, 16); g.fillStyle = cs.roof; g.beginPath(); g.moveTo(-12, yb - 16); g.lineTo(-7, yb - 27); g.lineTo(11, yb - 27); g.lineTo(18, yb - 16); g.closePath(); g.fill();
     g.fillStyle = '#fff'; g.fillRect(24, yb - 11, 4, 4);
